@@ -1,0 +1,60 @@
+{
+  "name": "@thediscordlist/discord.js",
+  "version": "0.0.0",
+  "description": "Publish your discord.js bot's stats, heartbeat and commands to TheDiscordList automatically, and verify its webhooks.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": { "node": ">=18.17.0" },
+  "files": ["dist"],
+  "keywords": [
+    "discord",
+    "discord.js",
+    "thediscordlist",
+    "bot-list",
+    "autopost",
+    "webhooks"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheDiscordList/integration-discordjs.git"
+  },
+  "homepage": "https://github.com/TheDiscordList/integration-discordjs#readme",
+  "bugs": { "url": "https://github.com/TheDiscordList/integration-discordjs/issues" },
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/index.d.mts", "default": "./dist/index.mjs" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+    },
+    "./webhooks": {
+      "import": { "types": "./dist/webhooks.d.mts", "default": "./dist/webhooks.mjs" },
+      "require": { "types": "./dist/webhooks.d.cts", "default": "./dist/webhooks.cjs" }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.cts",
+  "typesVersions": { "*": { "webhooks": ["./dist/webhooks.d.cts"] } },
+  "peerDependencies": { "discord.js": "^14.22.0" },
+  "peerDependenciesMeta": { "discord.js": { "optional": true } },
+  "scripts": {
+    "build": "tsdown",
+    "check": "tsc --noEmit && oxlint src test",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint:pkg": "publint && attw --pack .",
+    "changeset": "changeset",
+    "prepublishOnly": "npm run build && npm run lint:pkg"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@changesets/cli": "^2.29.7",
+    "@types/node": "^22.0.0",
+    "discord.js": "^14.27.0",
+    "oxlint": "^1.78.0",
+    "publint": "^0.3.23",
+    "tsdown": "^0.22.14",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.10"
+  }
+}
