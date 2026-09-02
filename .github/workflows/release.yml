@@ -23,8 +23,8 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+      # v2 renamed `publish` to `publish-script`, and `github-token` already
+      # defaults to ${{ github.token }} — the old GITHUB_TOKEN env is gone.
       - uses: changesets/action@v2
         with:
-          publish: npm publish --access public
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          publish-script: npm publish --access public
