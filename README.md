@@ -267,6 +267,11 @@ heartbeat's internal stats forward.
 - Node.js `>= 18.17`
 - discord.js `^14.22` (optional peer — the `/webhooks` entry point does not need it)
 
+Working on this repo needs Node `>= 22.18`: tsdown, vitest and oxlint all floor
+higher than the package asks of its consumers. `npm run smoke` runs the built
+output on 18.17 in CI, so that gap stays a toolchain detail rather than a
+quietly broken promise.
+
 discord.js v15 is not supported yet: it removes the sharding APIs detection
 reads, and widening the peer range without a tested path would be a promise
 this package could not keep.

@@ -11,7 +11,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['18.17', '20', '22', '24']
+        # The dev toolchain floors far above what this package asks of its
+        # consumers: tsdown needs ^22.18, vitest needs ^20, and oxlint ships an
+        # extensionless bin that Node 18 refuses to load. The `engines` job
+        # below is what keeps the ">=18.17.0" promise honest.
+        node: ['22', '24']
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -23,3 +27,21 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run lint:pkg
+
+  engines:
+    name: dist runs on Node 18.17
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Swap the runtime underneath the built artifact. This is the only thing
+      # that will catch an accidental use of a newer built-in.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '18.17'
+      - run: npm run smoke
