@@ -1,11 +1,8 @@
-// Proves the built artifact actually runs on the oldest Node in `engines`.
+// Runs the built artifact on the oldest Node in `engines`.
 //
-// The dev toolchain floors much higher than consumers do — tsdown needs 22.18,
-// vitest needs 20 — so no CI row can both build and run on 18.17. This script
-// is what keeps `"node": ">=18.17.0"` an audited fact rather than a claim:
-// build on a modern Node, then run this one on the oldest supported Node.
-//
-//   npm run build && npm run smoke
+// The dev toolchain floors far above that, so no CI row can both build and run
+// on 18.17. Build on a modern Node, then run this on the oldest supported one:
+// `npm run build && npm run smoke`.
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -32,8 +29,7 @@ const t = Math.floor(Date.now() / 1000);
 const secret = 'whsec_smoke';
 const valid = `t=${t},v1=${createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')}`;
 
-// node:crypto and timingSafeEqual are the only runtime APIs this package leans
-// on, so exercising them is the whole surface worth smoke-testing.
+// node:crypto is the only runtime API the package leans on beyond fetch.
 for (const module of webhooks) {
   assert.equal(module.verifyWebhook(body, valid, secret).event, 'webhook.ping');
   assert.throws(() => module.verifyWebhook(body, `t=${t},v1=zz`, secret), { code: 'INVALID_SIGNATURE' });

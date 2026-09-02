@@ -6,7 +6,6 @@ export default defineConfig({
   dts: true,
   target: 'node18',
   clean: true,
-  // Deliberately NOT `exports: true`. It emits an exports map with no `types`
-  // conditions, writes a wrong top-level `types`, re-adds `module`, and
-  // overwrites the hand-written map in package.json on every build.
+  // Never `exports: true`: it overwrites the hand-written exports map in
+  // package.json, dropping the nested `types` conditions attw depends on.
 });

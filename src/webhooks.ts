@@ -235,8 +235,8 @@ function contextFrom(get: (name: string) => string | null | undefined): WebhookC
 }
 
 function verifyOptions(options: WebhookHandlerOptions): VerifyWebhookOptions {
-  // Spread conditionally: `exactOptionalPropertyTypes` refuses an explicit
-  // `undefined` here, and the API refuses one in a request body.
+  // Spread rather than pass through: an explicit `undefined` is not the same
+  // as an absent key under `exactOptionalPropertyTypes`.
   return options.toleranceSeconds === undefined ? {} : { toleranceSeconds: options.toleranceSeconds };
 }
 

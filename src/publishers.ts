@@ -224,8 +224,6 @@ abstract class Publisher {
   }
 }
 
-// `| undefined` on every optional: with `exactOptionalPropertyTypes` the
-// caller would otherwise have to spread each key conditionally.
 export interface StatsOptions {
   interval?: number | undefined;
   debounce?: number | undefined;

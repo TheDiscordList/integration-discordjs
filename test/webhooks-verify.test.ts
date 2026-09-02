@@ -76,8 +76,7 @@ describe('verifyWebhook', () => {
   });
 
   // Buffer.from('zz','hex') is zero-length, which makes timingSafeEqual throw on
-  // a length mismatch. @top-gg/sdk@4.0.0 does this inside an async callback with
-  // no try/catch: one such request kills the host process.
+  // a length mismatch. Uncaught, one such request kills the host process.
   it('rejects a non-hex signature without throwing anything else', () => {
     expect(codeOf(() => verifyWebhook(body, 't=1786712208,v1=zz', SECRET, { now })))
       .toBe('INVALID_SIGNATURE');

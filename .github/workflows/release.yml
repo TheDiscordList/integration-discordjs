@@ -12,7 +12,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      id-token: write # npm trusted publishing (OIDC); classic tokens died in Dec 2025
+      id-token: write # npm trusted publishing (OIDC)
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -23,8 +23,6 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
-      # v2 renamed `publish` to `publish-script`, and `github-token` already
-      # defaults to ${{ github.token }} — the old GITHUB_TOKEN env is gone.
       - uses: changesets/action@v2
         with:
           publish-script: npm publish --access public

@@ -223,8 +223,7 @@ export async function measureServerCount(
     return null;
   }
 
-  // Arity guard. discord-hybrid-sharding's own is commented out upstream, so a
-  // short answer would silently undercount the whole bot.
+  // Arity guard: a short answer would silently undercount the whole bot.
   if (rows.length !== bus.count) return null;
 
   let total = 0;
