@@ -11,6 +11,7 @@
  * ```
  */
 import { EventEmitter } from 'node:events';
+import pkg from '../package.json' with { type: 'json' };
 import { Events, GatewayIntentBits, version as discordJsVersion, type Client } from 'discord.js';
 
 import { createApiClient, type ApiClient } from './http.js';
@@ -37,8 +38,8 @@ export type {
 export type { Outcome, Priority } from './http.js';
 export type { PostResult, PublisherError, PublisherKind } from './publishers.js';
 
-/** Kept in step with package.json by `test/version.test.ts`. */
-export const version = '0.0.0';
+/** This package's version, inlined from package.json at build time. */
+export const version: string = pkg.version;
 
 export const DEFAULT_BASE_URL = 'https://thediscordlist.com/api';
 
