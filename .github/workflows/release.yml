@@ -19,10 +19,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - run: npm install -g npm@^11.15.0 # npm stage publish
       - run: npm ci
       - run: npm run check
       - run: npm test
       - run: npm run build
       - uses: changesets/action@v2
         with:
-          publish-script: npm publish --access public
+          publish-script: npm stage publish --access public
