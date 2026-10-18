@@ -275,11 +275,11 @@ heartbeat's internal stats forward.
 - **Heartbeats need Gold or higher.** On a `403` the heartbeat publisher
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
-- **Rate limits are shared.** The API counts stats, heartbeats and commands
-  against one budget keyed by client IP. This package keeps one client-side
-  budget to match, and drops stats before heartbeats when it is scarce — a
-  stale number beats a false "down" on your status page. On shared hosting,
-  other bots behind the same egress IP count against you.
+- **Rate limits are shared.** The API counts stats and commands against one
+  budget per bot (60/min; heartbeats have their own 120/min). A `429` suspends
+  stats and commands together for `Retry-After` (or until `X-RateLimit-Reset`,
+  at most an hour); heartbeats bypass it — a stale number beats a false "down"
+  on your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing. The distinction is deliberate, so probing cannot enumerate.
 - **Guild counts can drift upward permanently.** If Discord re-IDENTIFYs a

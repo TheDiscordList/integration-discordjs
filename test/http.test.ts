@@ -108,8 +108,8 @@ describe('createApiClient', () => {
       .toMatchObject({ kind: 'throttled', retryAfterMs: 60_000 });
   });
 
-  // One counter per client IP is shared across all three endpoints, so the
-  // suspension is one budget, not one per route. A normal-priority job is
+  // Stats and commands share one per-bot budget, so the suspension is one
+  // budget, not one per route. A normal-priority job is
   // dropped rather than queued: stats are last-write-wins.
   it('drops a normal-priority request while suspended', async () => {
     mockFetch(json(429, {}, { 'retry-after': '30' }), json(200, {}));
