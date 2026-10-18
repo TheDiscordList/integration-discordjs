@@ -30,7 +30,7 @@ It starts three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild join/leave |
-| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus immediately on any shard transition |
+| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus soon after any shard transition |
 | Commands | your registered slash commands | once, ~10s after ready |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
@@ -40,6 +40,26 @@ scoped to one listing, so it is the only credential this package needs.
 warns once and returns an inert object — a forgotten environment variable never
 takes down a deploy. A token pasted with surrounding whitespace or a leading
 `Bearer ` works as is.
+
+### Defaults
+
+- **Stats:** checked every 300s, and 20s after the last guild join or leave.
+  Never two posts within 60s. An unchanged count is skipped until 30 minutes
+  have passed.
+- **Heartbeat:** every 30s plus 0–5s of jitter, retuned from each response to a
+  third of the server's grace window and kept within 15–60s. A shard
+  transition beats out of band, at least 10s after the previous beat; it never
+  moves the regular schedule.
+- **Commands:** once, 10s after ready.
+- **A `403`** (the endpoint needs a higher plan) pauses that publisher for 30
+  minutes, then it tries again.
+- **Requests** time out after 10s and get three attempts, backing off
+  1s · 2ⁿ (capped at 30s, jittered to 50–100%) and never past the publisher's
+  next run. Only network errors, `408`, `425`, `429` and `5xx` are retried. A
+  `429` waits out `Retry-After` or `X-RateLimit-Reset` — 60s when neither is
+  sent, never more than an hour. Every wait runs on a monotonic clock.
+- **Webhooks:** a signature more than 300s from now is rejected. The handlers
+  cap the body at 1 MiB and give `onEvent` 8s before answering `202`.
 
 ## Sharding
 
