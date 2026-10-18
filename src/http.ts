@@ -8,6 +8,10 @@
  * on the user's public status page.
  */
 export const DEFAULT_TIMEOUT_MS = 10_000;
+/** However far out Retry-After or X-RateLimit-Reset points, never go quiet for longer. */
+export const MAX_RATE_LIMIT_WAIT_MS = 3_600_000;
+
+const MAX_ATTEMPTS = 3;
 
 export type Outcome =
   | { kind: 'ok'; status: number; body: unknown }
@@ -22,7 +26,14 @@ export type Outcome =
 export type Priority = 'normal' | 'heartbeat';
 
 export interface ApiClient {
-  post(path: string, body: unknown, priority: Priority): Promise<Outcome>;
+  /**
+   * One request, retrying transient failures and, once its window lifts, a 429.
+   *
+   * `nextTickInMs` is the time until the caller runs again. If a wait would
+   * outlast it, the attempt is dropped: the next tick carries fresher data,
+   * and a failed request still burns rate-limit budget.
+   */
+  post(path: string, body: unknown, priority: Priority, nextTickInMs?: number): Promise<Outcome>;
 }
 
 export interface ApiClientOptions {
@@ -33,9 +44,11 @@ export interface ApiClientOptions {
 }
 
 /**
- * Drops `undefined` keys recursively. An explicit `null` survives, and must:
- * the API's `prepareForValidation` only defaults keys that are *absent*, and
- * none of its rules are `nullable`, so a serialised `undefined` is a 422.
+ * Drops `undefined` keys recursively, so an unset value arrives absent rather
+ * than `null`. The API's `prepareForValidation` only defaults keys that are
+ * *absent*, and `cluster`, `cluster_count` and `shards` are not `nullable`, so
+ * a `null` there is a 422. An explicit `null` survives: where a rule is
+ * nullable it is a deliberate "unknown".
  */
 export function stripUndefined<T>(value: T): T {
   if (Array.isArray(value)) return value.map((item) => stripUndefined(item)) as unknown as T;
@@ -49,7 +62,7 @@ export function stripUndefined<T>(value: T): T {
 }
 
 export function isRetryable(outcome: Outcome): boolean {
-  return outcome.kind === 'transient';
+  return outcome.kind === 'transient' || outcome.kind === 'throttled';
 }
 
 /** Full jitter in the upper half, capped at 30s. */
@@ -68,7 +81,6 @@ function classify(status: number, body: unknown, retryAfterHeader: string | null
   // 404 is "unknown id, or the id belongs to a server listing" — deliberately
   // never "bad token", so anti-enumeration holds. Do not report it as auth.
   if (status === 404 || status === 409) return { kind: 'config', status };
-  if (status === 400 || status === 422) return { kind: 'payload', status };
   if (status === 429) {
     const seconds = Number(retryAfterHeader);
     return {
@@ -77,60 +89,87 @@ function classify(status: number, body: unknown, retryAfterHeader: string | null
       retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 60_000,
     };
   }
+  // Retrying the same request cannot turn any other 4xx into a success.
+  if (status >= 400 && status < 500 && status !== 408 && status !== 425) return { kind: 'payload', status };
   return { kind: 'transient', status, error: new Error(`TheDiscordList responded ${status}.`) };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
 export function createApiClient(options: ApiClientOptions): ApiClient {
+  const baseUrl = options.baseUrl.replace(/\/+$/, '');
   // Instance state, never module state: a dual ESM+CJS package loaded in both
   // formats would otherwise share one budget across two unrelated posters.
   let suspendedUntil = 0;
 
+  async function once(path: string, body: unknown, ignoreLimit: boolean): Promise<Outcome> {
+    if (!ignoreLimit && performance.now() < suspendedUntil) {
+      return { kind: 'dropped', status: null };
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${options.token}`,
+          'content-type': 'application/json',
+          'user-agent': options.userAgent,
+        },
+        body: JSON.stringify(stripUndefined(body)),
+        // Global fetch has no overall timeout. This timer is unref'd, so it
+        // will not hold the event loop open on its own.
+        signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      });
+    } catch (error) {
+      return { kind: 'transient', status: null, error: error as Error };
+    }
+
+    // Always drain the body, or undici holds the socket open. A truncated
+    // response rejects here, and no public method may ever reject.
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      return { kind: 'transient', status: response.status, error: error as Error };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = text === '' ? null : JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+
+    const outcome = classify(response.status, parsed, response.headers.get('retry-after'));
+    if (outcome.kind === 'throttled') {
+      // An absolute unix time, so it is read against the wall clock once.
+      const reset = Number(response.headers.get('x-ratelimit-reset'));
+      const untilReset = Number.isFinite(reset) && reset > 0 ? reset * 1000 - Date.now() : 0;
+      suspendedUntil = performance.now()
+        + Math.min(Math.max(outcome.retryAfterMs, untilReset), MAX_RATE_LIMIT_WAIT_MS)
+        + Math.round(Math.random() * 2000);
+    }
+    return outcome;
+  }
+
   return {
-    async post(path, body, priority) {
-      if (priority !== 'heartbeat' && Date.now() < suspendedUntil) {
-        return { kind: 'dropped', status: null };
-      }
+    async post(path, body, priority, nextTickInMs) {
+      let outcome: Outcome = { kind: 'dropped', status: null };
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // A request that just waited out the window goes through it, even if
+        // its timer fires a tick early.
+        outcome = await once(path, body, priority === 'heartbeat' || outcome.kind === 'throttled');
+        if (!isRetryable(outcome) || attempt === MAX_ATTEMPTS - 1) break;
 
-      let response: Response;
-      try {
-        response = await fetch(`${options.baseUrl}${path}`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${options.token}`,
-            'content-type': 'application/json',
-            'user-agent': options.userAgent,
-          },
-          body: JSON.stringify(stripUndefined(body)),
-          // Global fetch has no overall timeout. This timer is unref'd, so it
-          // will not hold the event loop open on its own.
-          signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-        });
-      } catch (error) {
-        return { kind: 'transient', status: null, error: error as Error };
-      }
-
-      // Always drain the body, or undici holds the socket open. A truncated
-      // response rejects here, and no public method may ever reject.
-      let text: string;
-      try {
-        text = await response.text();
-      } catch (error) {
-        return { kind: 'transient', status: response.status, error: error as Error };
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = text === '' ? null : JSON.parse(text);
-      } catch {
-        parsed = text;
-      }
-
-      const outcome = classify(response.status, parsed, response.headers.get('retry-after'));
-      if (outcome.kind === 'throttled') {
-        const reset = Number(response.headers.get('x-ratelimit-reset'));
-        const untilReset = Number.isFinite(reset) && reset > 0 ? reset * 1000 : 0;
-        suspendedUntil = Math.max(Date.now() + outcome.retryAfterMs, untilReset)
-          + Math.round(Math.random() * 2000);
+        const delay = outcome.kind === 'throttled' ? suspendedUntil - performance.now() : backoffMs(attempt);
+        if (nextTickInMs !== undefined && delay >= nextTickInMs) break;
+        await sleep(delay);
       }
       return outcome;
     },

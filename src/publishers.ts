@@ -6,7 +6,7 @@
  * process. Timers are chained `setTimeout`s, never `setInterval`: interval
  * drift causes self-inflicted 429s.
  */
-import { backoffMs, type ApiClient, type Outcome, type Priority } from './http.js';
+import type { ApiClient, Outcome, Priority } from './http.js';
 import { collectShards, measureServerCount, type ClientLike, type ShardReport, type Topology } from './topology.js';
 
 export const STATS_INTERVAL_MS = 300_000;
@@ -27,8 +27,6 @@ export const COMMANDS_DELAY_MS = 10_000;
 
 /** The Gold tier is derived per request from Stripe, so it can flip mid-run. */
 export const PLAN_REPROBE_MS = 1_800_000;
-
-const MAX_ATTEMPTS = 3;
 
 export type PublisherKind = 'stats' | 'heartbeat' | 'commands';
 
@@ -69,13 +67,6 @@ function publisherError(
   retryable: boolean,
 ): PublisherError {
   return Object.assign(new Error(message), { type, status, retryable });
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
 }
 
 abstract class Publisher {
@@ -136,32 +127,14 @@ abstract class Publisher {
     this.deps.emit.error(publisherError(message, this.kind, status, retryable));
   }
 
-  /**
-   * Sends one request, retrying only transient failures.
-   *
-   * `nextTickInMs` is the time until this publisher's next scheduled run. If a
-   * backoff would outlast it, the attempt is dropped: the next tick carries
-   * fresher data, and a failed request still burns rate-limit budget.
-   */
+  /** `nextTickInMs` is the time until this publisher's next scheduled run; no retry outlasts it. */
   protected async send(
     path: string,
     body: unknown,
     priority: Priority,
     nextTickInMs?: number,
   ): Promise<PostResult> {
-    let outcome: Outcome = { kind: 'dropped', status: null };
-
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      outcome = await this.deps.api.post(path, body, priority);
-      if (outcome.kind !== 'transient') break;
-
-      const delay = backoffMs(attempt);
-      if (attempt === MAX_ATTEMPTS - 1) break;
-      if (nextTickInMs !== undefined && delay >= nextTickInMs) break;
-      await sleep(delay);
-    }
-
-    return this.react(outcome);
+    return this.react(await this.deps.api.post(path, body, priority, nextTickInMs));
   }
 
   protected react(outcome: Outcome): PostResult {

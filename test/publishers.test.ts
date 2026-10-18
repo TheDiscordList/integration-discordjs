@@ -85,6 +85,7 @@ describe('StatsPublisher', () => {
       '/bots/1/stats',
       { server_count: 2, shard_count: 1 },
       'normal',
+      STATS_INTERVAL_MS,
     );
     publisher.stop();
   });
@@ -142,18 +143,6 @@ describe('StatsPublisher', () => {
     publisher.stop();
   });
 
-  it('retries a transient failure three times and then gives up', async () => {
-    const api = makeApi({ kind: 'transient', status: 500, error: new Error('bad gateway') });
-    const publisher = new StatsPublisher(makeDeps({ api }));
-
-    const pending = publisher.post();
-    await vi.advanceTimersByTimeAsync(10_000);
-
-    expect(await pending).toMatchObject({ ok: false, status: 500 });
-    expect(api.post).toHaveBeenCalledTimes(3);
-    publisher.stop();
-  });
-
   it('disables itself exactly once on a 401 and clears its timer', async () => {
     const api = makeApi({ kind: 'auth', status: 401 });
     const emit = makeEmit();
@@ -197,6 +186,7 @@ describe('HeartbeatPublisher', () => {
       '/bots/1/heartbeat',
       { cluster: 0, cluster_count: 1, shards: [{ id: 0, status: 'ready', latency_ms: 42, guilds: 2 }] },
       'heartbeat',
+      30_000,
     );
     publisher.stop();
   });
@@ -314,7 +304,7 @@ describe('CommandsPublisher', () => {
     await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS);
 
     expect(rest.get).toHaveBeenCalledWith('/applications/1/commands');
-    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands }, 'normal');
+    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands }, 'normal', undefined);
     publisher.stop();
   });
 
@@ -335,7 +325,7 @@ describe('CommandsPublisher', () => {
     );
 
     await publisher.post();
-    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands: [] }, 'normal');
+    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands: [] }, 'normal', undefined);
   });
 
   it('does nothing on a process that is not the elected publisher', async () => {
