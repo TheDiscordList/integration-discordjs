@@ -4,6 +4,7 @@ import type { ApiClient, Outcome } from '../src/http.js';
 import {
   COMMANDS_DELAY_MS,
   CommandsPublisher,
+  HEARTBEAT_OUT_OF_BAND_GAP_MS,
   HeartbeatPublisher,
   PLAN_REPROBE_MS,
   STATS_DEBOUNCE_MS,
@@ -288,6 +289,75 @@ describe('HeartbeatPublisher', () => {
     await vi.advanceTimersByTimeAsync(1500);
 
     expect(api.post).toHaveBeenCalledTimes(1);
+    publisher.stop();
+  });
+
+  it('clamps a configured cadence before the first response can', async () => {
+    const api = makeApi();
+    const publisher = new HeartbeatPublisher(makeDeps({ api }), { interval: 1000 });
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(14_000);
+
+    expect(api.post).toHaveBeenCalledTimes(1);
+    publisher.stop();
+  });
+
+  it('spaces an out-of-band beat at least 10s after the previous one', async () => {
+    const times: number[] = [];
+    const api = makeApi();
+    api.post.mockImplementation(async () => {
+      times.push(performance.now());
+      return OK;
+    });
+    const publisher = new HeartbeatPublisher(makeDeps({ api }));
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(2_000);
+    publisher.beatNow();
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_OUT_OF_BAND_GAP_MS);
+
+    expect(times).toEqual([0, HEARTBEAT_OUT_OF_BAND_GAP_MS]);
+    publisher.stop();
+  });
+
+  // Each out-of-band beat used to consume a regular slot, so a few shard
+  // transitions pushed the next regular beat past the server's 90s grace.
+  it('keeps the regular cadence through out-of-band beats', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const times: number[] = [];
+    const api = makeApi();
+    api.post.mockImplementation(async () => {
+      times.push(performance.now());
+      return OK;
+    });
+    const publisher = new HeartbeatPublisher(makeDeps({ api }));
+
+    publisher.start();
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      publisher.beatNow();
+    }
+    await vi.advanceTimersByTimeAsync(36_000);
+
+    expect(times).toEqual([0, 10_000, 20_000, 30_000, 60_000]);
+    publisher.stop();
+    vi.mocked(Math.random).mockRestore();
+  });
+
+  // Every missed slot used to be due at once, so a day-long suspension ended
+  // in thousands of beats at one a second.
+  it('resumes at its normal cadence after a long suspension, without a burst', async () => {
+    const api = makeApi(OK);
+    api.post.mockResolvedValueOnce({ kind: 'plan', status: 403 });
+    const publisher = new HeartbeatPublisher(makeDeps({ api }));
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(PLAN_REPROBE_MS + 5_000);
+    expect(api.post).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api.post.mock.calls.length).toBeLessThanOrEqual(4);
     publisher.stop();
   });
 });

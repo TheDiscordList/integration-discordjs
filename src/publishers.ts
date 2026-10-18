@@ -4,7 +4,8 @@
  * Every one of them resolves a `PostResult` and never rejects, and every timer
  * callback is wrapped, because a transient 502 must never take down the host
  * process. Timers are chained `setTimeout`s, never `setInterval`: interval
- * drift causes self-inflicted 429s.
+ * drift causes self-inflicted 429s. Every suspension and gap is measured with
+ * `performance.now()`, so a wall-clock jump cannot stretch or skip one.
  */
 import type { ApiClient, Outcome, Priority } from './http.js';
 import { collectShards, measureServerCount, type ClientLike, type ShardReport, type Topology } from './topology.js';
@@ -21,6 +22,9 @@ export const HEARTBEAT_DEFAULT_INTERVAL_MS = 30_000;
 export const HEARTBEAT_MIN_INTERVAL_MS = 15_000;
 export const HEARTBEAT_MAX_INTERVAL_MS = 60_000;
 export const HEARTBEAT_JITTER_MS = 5_000;
+/** An out-of-band beat never follows the previous beat more closely than this. */
+export const HEARTBEAT_OUT_OF_BAND_GAP_MS = 10_000;
+const BEAT_NOW_DELAY_MS = 1_000;
 
 /** Offset from the stats post: the two share one server-side rate budget. */
 export const COMMANDS_DELAY_MS = 10_000;
@@ -163,7 +167,7 @@ abstract class Publisher {
       case 'plan':
         // Not a disable: a bot can flip free → Gold mid-run, and requiring a
         // restart to notice would be a support ticket every time.
-        this.suspendedUntil = Date.now() + PLAN_REPROBE_MS;
+        this.suspendedUntil = performance.now() + PLAN_REPROBE_MS;
         this.reportOnce(
           403,
           `The ${this.kind} endpoint needs a higher plan. Reprobing in 30 minutes.`,
@@ -212,7 +216,7 @@ export class StatsPublisher extends Publisher {
   private readonly minGap: number;
   private readonly getServerCount: (() => number | Promise<number>) | undefined;
 
-  private lastPostAt = 0;
+  private lastPostAt = -Infinity;
   private lastCount: number | undefined;
   private lastShardCount: number | undefined;
   private debounceCap = 0;
@@ -233,7 +237,7 @@ export class StatsPublisher extends Publisher {
   /** Trailing debounce, hard-capped so a join storm cannot starve the post. */
   onGuildChange(): void {
     if (this.disabledReason !== undefined) return;
-    const now = Date.now();
+    const now = performance.now();
     if (this.debounceCap === 0) this.debounceCap = now + this.minGap;
     this.schedule(Math.min(now + this.debounce, this.debounceCap) - now, () => this.tick());
   }
@@ -252,16 +256,16 @@ export class StatsPublisher extends Publisher {
     if (!manual && this.disabledReason !== undefined) return { ok: false, status: null, skipped: 'disabled' };
     if (this.inFlight) return { ok: false, status: null, skipped: 'in-flight' };
 
-    const now = Date.now();
+    const now = performance.now();
     if (!manual && now < this.suspendedUntil) {
       this.schedule(this.suspendedUntil - now, () => this.tick());
       return { ok: false, status: null, skipped: 'plan' };
     }
 
-    // A hard monotonic floor. A join storm, a mass reconnect and a manual
-    // postStats() all route through it, so the ceiling is structurally
-    // 1 req/min rather than statistically.
-    if (this.lastPostAt !== 0 && now < this.lastPostAt + this.minGap) {
+    // A hard floor. A join storm, a mass reconnect and a manual postStats()
+    // all route through it, so the ceiling is structurally 1 req/min rather
+    // than statistically.
+    if (now < this.lastPostAt + this.minGap) {
       this.schedule(this.lastPostAt + this.minGap - now, () => this.tick());
       return { ok: false, status: null, skipped: 'min-gap' };
     }
@@ -285,13 +289,13 @@ export class StatsPublisher extends Publisher {
       if (
         count === this.lastCount
         && shardCount === this.lastShardCount
-        && Date.now() < this.lastPostAt + STATS_FORCE_AFTER_MS
+        && performance.now() < this.lastPostAt + STATS_FORCE_AFTER_MS
       ) {
         this.schedule(this.interval, () => this.tick());
         return { ok: false, status: null, skipped: 'unchanged' };
       }
 
-      this.lastPostAt = Date.now();
+      this.lastPostAt = performance.now();
       // shard_count is ALWAYS sent: the server writes `$data['shard_count'] ?? null`
       // unconditionally, so omitting it nulls the stored value.
       const result = await this.send(
@@ -323,14 +327,15 @@ export class HeartbeatPublisher extends Publisher {
   readonly kind = 'heartbeat' as const;
 
   private interval: number;
-  private startedAt = 0;
-  private beats = 0;
+  private nextTarget = 0;
+  private lastBeatAt = -Infinity;
+  private beatNowPending = false;
   private inFlight = false;
   private nextBeatWithinSeconds: number | undefined;
 
   constructor(deps: PublisherDeps, options: { interval?: number | undefined } = {}) {
     super(deps);
-    this.interval = options.interval ?? HEARTBEAT_DEFAULT_INTERVAL_MS;
+    this.interval = clampInterval(options.interval ?? HEARTBEAT_DEFAULT_INTERVAL_MS);
   }
 
   /** Starts on construction, not on ready: a booting bot must read "connecting", not dead. */
@@ -342,15 +347,17 @@ export class HeartbeatPublisher extends Publisher {
       this.disable(null, 'cluster-count-unknown');
       return;
     }
-    this.startedAt = Date.now();
-    this.beats = 0;
+    this.nextTarget = performance.now();
     this.schedule(0, () => this.tick());
   }
 
-  /** Out-of-band beat after a shard event. Repeated calls coalesce into one. */
+  /** Out-of-band beat after a shard event. Calls before it fires coalesce into one. */
   beatNow(): void {
-    if (this.disabledReason !== undefined) return;
-    this.schedule(1000, () => this.tick());
+    const now = performance.now();
+    if (this.disabledReason !== undefined || this.beatNowPending || now < this.suspendedUntil) return;
+    this.beatNowPending = true;
+    const delay = Math.max(BEAT_NOW_DELAY_MS, this.lastBeatAt + HEARTBEAT_OUT_OF_BAND_GAP_MS - now);
+    this.schedule(delay, () => this.tick());
   }
 
   async post(): Promise<PostResult> {
@@ -362,6 +369,7 @@ export class HeartbeatPublisher extends Publisher {
   }
 
   private async tick(): Promise<void> {
+    this.beatNowPending = false;
     await this.beat(false);
   }
 
@@ -386,6 +394,7 @@ export class HeartbeatPublisher extends Publisher {
     };
 
     this.inFlight = true;
+    this.lastBeatAt = performance.now();
     let result: PostResult;
     try {
       result = await this.send(`/bots/${this.deps.botId}/heartbeat`, body, 'heartbeat', this.interval);
@@ -410,8 +419,7 @@ export class HeartbeatPublisher extends Publisher {
    */
   private retune(): void {
     if (this.nextBeatWithinSeconds === undefined) return;
-    const proposed = Math.round((this.nextBeatWithinSeconds / 3) * 1000);
-    this.interval = Math.min(Math.max(proposed, HEARTBEAT_MIN_INTERVAL_MS), HEARTBEAT_MAX_INTERVAL_MS);
+    this.interval = clampInterval(Math.round((this.nextBeatWithinSeconds / 3) * 1000));
   }
 
   protected override react(outcome: Outcome): PostResult {
@@ -423,14 +431,24 @@ export class HeartbeatPublisher extends Publisher {
     return super.react(outcome);
   }
 
-  /** Absolute-time scheduling, so a slow request cannot drift the cadence. */
+  /**
+   * Absolute targets, so a slow request cannot drift the cadence and an
+   * out-of-band beat does not push the next regular one back. Missed slots
+   * are skipped, so the end of a long suspension is one beat, not a burst.
+   */
   private scheduleNext(minDelayMs = 0): void {
-    this.beats += 1;
+    const now = performance.now();
+    if (this.nextTarget <= now) {
+      this.nextTarget += (Math.floor((now - this.nextTarget) / this.interval) + 1) * this.interval;
+    }
     const jitter = Math.round(Math.random() * HEARTBEAT_JITTER_MS);
-    const target = this.startedAt + this.beats * this.interval + jitter;
-    const delay = Math.max(target - Date.now(), minDelayMs, 1000, this.suspendedUntil - Date.now());
+    const delay = Math.max(this.nextTarget + jitter - now, minDelayMs, BEAT_NOW_DELAY_MS, this.suspendedUntil - now);
     this.schedule(delay, () => this.tick());
   }
+}
+
+function clampInterval(ms: number): number {
+  return Math.min(Math.max(ms, HEARTBEAT_MIN_INTERVAL_MS), HEARTBEAT_MAX_INTERVAL_MS);
 }
 
 /** Just enough of `client.rest` to fetch the command list. */
@@ -462,7 +480,7 @@ export class CommandsPublisher extends Publisher {
 
   private async publish(): Promise<PostResult> {
     if (this.disabledReason !== undefined) return { ok: false, status: null, skipped: 'disabled' };
-    if (Date.now() < this.suspendedUntil) return { ok: false, status: null, skipped: 'plan' };
+    if (performance.now() < this.suspendedUntil) return { ok: false, status: null, skipped: 'plan' };
 
     let raw: unknown;
     try {
