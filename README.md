@@ -38,7 +38,8 @@ scoped to one listing, so it is the only credential this package needs.
 
 `autopost` is safe to call before or after `login()`. With a missing token it
 warns once and returns an inert object — a forgotten environment variable never
-takes down a deploy.
+takes down a deploy. A token pasted with surrounding whitespace or a leading
+`Bearer ` works as is.
 
 ## Sharding
 

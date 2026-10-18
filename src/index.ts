@@ -37,6 +37,12 @@ export type {
 } from './topology.js';
 export type { Outcome, Priority } from './http.js';
 export type { PostResult, PublisherError, PublisherKind } from './publishers.js';
+export {
+  HEARTBEAT_DEFAULT_INTERVAL_MS,
+  STATS_DEBOUNCE_MS,
+  STATS_INTERVAL_MS,
+  STATS_MIN_GAP_MS,
+} from './publishers.js';
 
 /** This package's version, inlined from package.json at build time. */
 export const version: string = pkg.version;
@@ -44,6 +50,8 @@ export const version: string = pkg.version;
 export const DEFAULT_BASE_URL = 'https://thediscordlist.com/api';
 
 const LOG_PREFIX = '[@thediscordlist/discord.js]';
+
+const DISABLED: PostResult = Object.freeze({ ok: false, status: null, skipped: 'disabled' });
 
 export interface AutopostOptions {
   /** Discord application id. Defaults to `client.application.id`. */
@@ -54,18 +62,21 @@ export interface AutopostOptions {
   stats?: {
     /** Default: true. */
     enabled?: boolean | undefined;
-    /** Default: 300000. */
+    /** Default: {@link STATS_INTERVAL_MS}. */
     interval?: number | undefined;
-    /** Trailing debounce after guildCreate/guildDelete. Default: 20000. */
+    /** Trailing debounce after guildCreate/guildDelete. Default: {@link STATS_DEBOUNCE_MS}. */
     debounce?: number | undefined;
-    /** Hard floor between two POSTs. Default: 60000. */
+    /** Hard floor between two POSTs. Default: {@link STATS_MIN_GAP_MS}. */
     minGap?: number | undefined;
   } | undefined;
 
   heartbeat?: {
     /** Default: true. */
     enabled?: boolean | undefined;
-    /** Starting cadence; retuned from the API response. Default: 30000. */
+    /**
+     * Starting cadence, clamped to 15–60s and retuned from the API response.
+     * Default: {@link HEARTBEAT_DEFAULT_INTERVAL_MS}.
+     */
     interval?: number | undefined;
   } | undefined;
 
@@ -215,15 +226,15 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
   }
 
   postStats(): Promise<PostResult> {
-    return this.stats?.post() ?? Promise.resolve({ ok: false, status: null, skipped: 'disabled' });
+    return this.stats?.post() ?? Promise.resolve(DISABLED);
   }
 
   postHeartbeat(): Promise<PostResult> {
-    return this.heartbeat?.post() ?? Promise.resolve({ ok: false, status: null, skipped: 'disabled' });
+    return this.heartbeat?.post() ?? Promise.resolve(DISABLED);
   }
 
   postCommands(): Promise<PostResult> {
-    return this.commands?.post() ?? Promise.resolve({ ok: false, status: null, skipped: 'disabled' });
+    return this.commands?.post() ?? Promise.resolve(DISABLED);
   }
 
   /** Clears every timer and detaches every client listener. Not restartable. */
@@ -270,14 +281,16 @@ export function autopost(
 ): Autoposter {
   const poster = new Autoposter();
 
-  if (!token) {
+  // Forgive a token pasted with surrounding whitespace or its "Bearer " prefix.
+  const cleaned = token?.trim().replace(/^bearer\s+/i, '');
+  if (!cleaned) {
     poster.warnOnce('no-token', 'No stats token supplied; auto-posting is disabled.');
     return poster;
   }
 
   const api = createApiClient({
     baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
-    token,
+    token: cleaned,
     userAgent: `@thediscordlist/discord.js/${version} (discord.js ${discordJsVersion})`,
   });
 
