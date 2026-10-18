@@ -30,7 +30,7 @@ It starts three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild join/leave |
-| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus immediately on any shard transition |
+| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus soon after any shard transition |
 | Commands | your registered slash commands | once, ~10s after ready |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
@@ -38,7 +38,28 @@ scoped to one listing, so it is the only credential this package needs.
 
 `autopost` is safe to call before or after `login()`. With a missing token it
 warns once and returns an inert object — a forgotten environment variable never
-takes down a deploy.
+takes down a deploy. A token pasted with surrounding whitespace or a leading
+`Bearer ` works as is.
+
+### Defaults
+
+- **Stats:** checked every 300s, and 20s after the last guild join or leave.
+  Never two posts within 60s. An unchanged count is skipped until 30 minutes
+  have passed.
+- **Heartbeat:** every 30s plus 0–5s of jitter, retuned from each response to a
+  third of the server's grace window and kept within 15–60s. A shard
+  transition beats out of band, at least 10s after the previous beat; it never
+  moves the regular schedule.
+- **Commands:** once, 10s after ready.
+- **A `403`** (the endpoint needs a higher plan) pauses that publisher for 30
+  minutes, then it tries again.
+- **Requests** time out after 10s and get three attempts, backing off
+  1s · 2ⁿ (capped at 30s, jittered to 50–100%) and never past the publisher's
+  next run. Only network errors, `408`, `425`, `429` and `5xx` are retried. A
+  `429` waits out `Retry-After` or `X-RateLimit-Reset` — 60s when neither is
+  sent, never more than an hour. Every wait runs on a monotonic clock.
+- **Webhooks:** a signature more than 300s from now is rejected. The handlers
+  cap the body at 1 MiB and give `onEvent` 8s before answering `202`.
 
 ## Sharding
 
@@ -142,7 +163,8 @@ app.use(express.json()); // everything else, after the webhook route
 ```
 
 The handler reads the raw stream itself, so mount it **before** any body
-parser. If your framework forces one in front, it must hand over raw bytes:
+parser. If your framework forces one in front, it must hand over raw bytes; a
+`Buffer` in `req.body` is verified as is:
 
 ```ts
 app.post('/webhooks/tdl', express.raw({ type: 'application/json' }), handler);
@@ -152,6 +174,9 @@ app.post('/webhooks/tdl', express.raw({ type: 'application/json' }), handler);
 and silently skips JSON, leaving `req.body` undefined. The handler detects an
 already-parsed body and reports a `BODY_CONSUMED` error rather than failing
 verification for reasons nobody can see.
+
+Both handlers, and `verifyWebhook`, throw a `TypeError` for an empty secret
+rather than checking signatures against an empty key.
 
 ### Hono, Next App Router, Workers, Bun, Deno
 
@@ -202,6 +227,7 @@ signature covers bytes, not meaning.
 ```ts
 type TdlWebhookEventName =
   | 'listing.bumped'
+  | 'listing.bump_ready' // the bump cooldown lifted; data.ready_at
   | 'listing.upvoted'
   | 'server.joined'   // server listings only — a bot listing never receives it
   | 'bot.added'
@@ -227,9 +253,9 @@ heartbeat's internal stats forward.
   and **a 2xx to that probe re-enables it**.
 - **Register an exact `https://` URL with no redirect.** The sender treats 3xx
   as a failure, so an `http → https` or trailing-slash redirect burns all five
-  retries and counts toward the disable streak.
+  attempts and counts toward the disable streak.
 - **Deduplicate on `ctx.delivery`.** It equals `X-TDL-Delivery` and is stable
-  across all five retries of one delivery:
+  across all five attempts of one delivery:
 
   ```ts
   if (await redis.set(ctx.delivery, 1, 'EX', 86400, 'NX') === null) return;
@@ -249,11 +275,11 @@ heartbeat's internal stats forward.
 - **Heartbeats need Gold or higher.** On a `403` the heartbeat publisher
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
-- **Rate limits are shared.** The API counts stats, heartbeats and commands
-  against one budget keyed by client IP. This package keeps one client-side
-  budget to match, and drops stats before heartbeats when it is scarce — a
-  stale number beats a false "down" on your status page. On shared hosting,
-  other bots behind the same egress IP count against you.
+- **Rate limits are shared.** The API counts stats and commands against one
+  budget per bot (60/min; heartbeats have their own 120/min). A `429` suspends
+  stats and commands together for `Retry-After` (or until `X-RateLimit-Reset`,
+  at most an hour); heartbeats bypass it — a stale number beats a false "down"
+  on your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing. The distinction is deliberate, so probing cannot enumerate.
 - **Guild counts can drift upward permanently.** If Discord re-IDENTIFYs a

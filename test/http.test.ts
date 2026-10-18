@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { backoffMs, createApiClient, isRetryable, stripUndefined } from '../src/http.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { backoffMs, createApiClient, isRetryable, MAX_RATE_LIMIT_WAIT_MS, stripUndefined } from '../src/http.js';
 
 const OPTS = { baseUrl: 'https://thediscordlist.com/api', token: 'tok', userAgent: 'test/1.0' };
 
@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 describe('stripUndefined', () => {
-  // An explicit null in a heartbeat body is a 422: the server only defaults keys
-  // that are ABSENT, and none of its rules are nullable.
+  // A null cluster or cluster_count is a 422: the server only defaults keys
+  // that are ABSENT, and neither rule is nullable.
   it('removes undefined keys and keeps a deliberate null', () => {
     expect(stripUndefined({ a: 1, b: undefined, c: null })).toEqual({ a: 1, c: null });
   });
@@ -58,6 +58,13 @@ describe('createApiClient', () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
+  // `https://…/api/` + `/bots/…` is a 404, which disables the publisher.
+  it('trims trailing slashes from the base URL', async () => {
+    const fetchMock = mockFetch(json(200, {}));
+    await createApiClient({ ...OPTS, baseUrl: 'https://thediscordlist.com/api//' }).post('/bots/1/stats', {}, 'normal');
+    expect(fetchMock.mock.calls[0]![0]).toBe('https://thediscordlist.com/api/bots/1/stats');
+  });
+
   it('strips undefined before serialising', async () => {
     const fetchMock = mockFetch(json(200, {}));
     await createApiClient(OPTS).post('/x', { a: 1, b: undefined }, 'normal');
@@ -70,41 +77,45 @@ describe('createApiClient', () => {
     [401, 'auth'],
     [403, 'plan'],
     [404, 'config'],
+    [405, 'payload'],
     [409, 'config'],
+    [413, 'payload'],
     [500, 'transient'],
     [502, 'transient'],
     [408, 'transient'],
+    [425, 'transient'],
   ])('classifies %i as %s', async (status, kind) => {
     mockFetch(json(status, { message: '' }));
-    expect((await createApiClient(OPTS).post('/x', {}, 'normal')).kind).toBe(kind);
+    // A next tick 1ms away leaves no room for a retry.
+    expect((await createApiClient(OPTS).post('/x', {}, 'normal', 1)).kind).toBe(kind);
   });
 
   it('classifies a network error as transient', async () => {
     mockFetch(new TypeError('fetch failed'));
-    expect(await createApiClient(OPTS).post('/x', {}, 'normal'))
+    expect(await createApiClient(OPTS).post('/x', {}, 'normal', 1))
       .toMatchObject({ kind: 'transient', status: null });
   });
 
   it('reads Retry-After on a 429', async () => {
     mockFetch(json(429, { message: 'Too Many Attempts.' }, { 'retry-after': '17' }));
-    expect(await createApiClient(OPTS).post('/x', {}, 'normal'))
+    expect(await createApiClient(OPTS).post('/x', {}, 'normal', 1))
       .toMatchObject({ kind: 'throttled', retryAfterMs: 17_000 });
   });
 
   it('falls back to 60s when Retry-After is missing', async () => {
     mockFetch(json(429, {}));
-    expect(await createApiClient(OPTS).post('/x', {}, 'normal'))
+    expect(await createApiClient(OPTS).post('/x', {}, 'normal', 1))
       .toMatchObject({ kind: 'throttled', retryAfterMs: 60_000 });
   });
 
-  // One counter per client IP is shared across all three endpoints, so the
-  // suspension is one budget, not one per route. A normal-priority job is
+  // Stats and commands share one per-bot budget, so the suspension is one
+  // budget, not one per route. A normal-priority job is
   // dropped rather than queued: stats are last-write-wins.
   it('drops a normal-priority request while suspended', async () => {
     mockFetch(json(429, {}, { 'retry-after': '30' }), json(200, {}));
     const client = createApiClient(OPTS);
 
-    await client.post('/x', {}, 'normal');
+    await client.post('/x', {}, 'normal', 1);
     expect((await client.post('/x', {}, 'normal')).kind).toBe('dropped');
   });
 
@@ -114,13 +125,13 @@ describe('createApiClient', () => {
     mockFetch(json(429, {}, { 'retry-after': '30' }), json(200, {}));
     const client = createApiClient(OPTS);
 
-    await client.post('/x', {}, 'normal');
+    await client.post('/x', {}, 'normal', 1);
     expect((await client.post('/bots/1/heartbeat', {}, 'heartbeat')).kind).toBe('ok');
   });
 
   it('keeps the suspension per instance, not at module scope', async () => {
     mockFetch(json(429, {}, { 'retry-after': '30' }), json(200, {}));
-    await createApiClient(OPTS).post('/x', {}, 'normal');
+    await createApiClient(OPTS).post('/x', {}, 'normal', 1);
     expect((await createApiClient(OPTS).post('/x', {}, 'normal')).kind).toBe('ok');
   });
 
@@ -130,7 +141,7 @@ describe('createApiClient', () => {
     vi.spyOn(broken, 'text').mockRejectedValue(new TypeError('terminated'));
     mockFetch(broken);
 
-    expect(await createApiClient(OPTS).post('/x', {}, 'normal'))
+    expect(await createApiClient(OPTS).post('/x', {}, 'normal', 1))
       .toMatchObject({ kind: 'transient', status: 200 });
   });
 
@@ -141,10 +152,67 @@ describe('createApiClient', () => {
   });
 });
 
+describe('retries', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries a transient failure three times and then gives up', async () => {
+    const fetchMock = mockFetch(json(500, {}), json(500, {}), json(500, {}));
+    const pending = createApiClient(OPTS).post('/x', {}, 'normal', 600_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(await pending).toMatchObject({ kind: 'transient', status: 500 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('never retries a 4xx it cannot fix', async () => {
+    const fetchMock = mockFetch(json(413, {}));
+    expect(await createApiClient(OPTS).post('/x', {}, 'normal', 600_000)).toMatchObject({ kind: 'payload' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a 429 once its window lifts, when that is before the next tick', async () => {
+    const fetchMock = mockFetch(json(429, {}, { 'retry-after': '1' }));
+    const pending = createApiClient(OPTS).post('/x', {}, 'normal', 600_000);
+    await vi.advanceTimersByTimeAsync(3_100);
+
+    expect(await pending).toMatchObject({ kind: 'ok' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('honours an X-RateLimit-Reset later than Retry-After', async () => {
+    const reset = String(Math.floor(Date.now() / 1000) + 120);
+    mockFetch(json(429, {}, { 'retry-after': '1', 'x-ratelimit-reset': reset }));
+    const client = createApiClient(OPTS);
+
+    await client.post('/x', {}, 'normal', 1);
+    await vi.advanceTimersByTimeAsync(110_000);
+    expect((await client.post('/x', {}, 'normal')).kind).toBe('dropped');
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect((await client.post('/x', {}, 'normal')).kind).toBe('ok');
+  });
+
+  it('never suspends for more than an hour', async () => {
+    mockFetch(json(429, {}, { 'retry-after': '86400' }));
+    const client = createApiClient(OPTS);
+
+    await client.post('/x', {}, 'normal', 1);
+    await vi.advanceTimersByTimeAsync(MAX_RATE_LIMIT_WAIT_MS - 1_000);
+    expect((await client.post('/x', {}, 'normal')).kind).toBe('dropped');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((await client.post('/x', {}, 'normal')).kind).toBe('ok');
+  });
+});
+
 describe('isRetryable', () => {
-  it('retries only transient outcomes', () => {
+  it('retries transient and throttled outcomes only', () => {
     expect(isRetryable({ kind: 'transient', status: 500, error: new Error('x') })).toBe(true);
-    expect(isRetryable({ kind: 'throttled', status: 429, retryAfterMs: 1 })).toBe(false);
+    expect(isRetryable({ kind: 'throttled', status: 429, retryAfterMs: 1 })).toBe(true);
     expect(isRetryable({ kind: 'auth', status: 401 })).toBe(false);
     expect(isRetryable({ kind: 'payload', status: 422 })).toBe(false);
   });

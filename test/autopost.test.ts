@@ -191,6 +191,25 @@ describe('autopost', () => {
     poster.stop();
   });
 
+  it.each(['  tok\n', 'Bearer tok', 'bearer   tok '])('cleans up a pasted token: %j', async (token) => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient({ isReady: () => true })), token);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok');
+    poster.stop();
+  });
+
+  it('treats a blank token as missing', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient({ isReady: () => true })), '   ');
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await poster.postStats()).toMatchObject({ skipped: 'disabled' });
+  });
+
   it('starts the heartbeat before login when botId is supplied', async () => {
     const fetchMock = stubFetch();
     const poster = autopost(start(fakeClient()), 'tok', { botId: '42' });

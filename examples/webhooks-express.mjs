@@ -12,7 +12,7 @@ const handler = createWebhookHandler({
   secret: process.env.TDL_WEBHOOK_SECRET,
 
   async onEvent(event, ctx) {
-    // ctx.delivery equals X-TDL-Delivery and is stable across all five retries.
+    // ctx.delivery equals X-TDL-Delivery and is stable across all five attempts.
     // Use it as an idempotency key; a manual "redeliver" from the UI mints a
     // new uuid on purpose, so it is not dropped as a duplicate.
     //

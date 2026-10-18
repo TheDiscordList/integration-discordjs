@@ -1,6 +1,6 @@
 {
   "name": "@thediscordlist/discord.js",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Publish your discord.js bot's stats, heartbeat and commands to TheDiscordList automatically, and verify its webhooks.",
   "license": "MIT",
   "type": "module",
