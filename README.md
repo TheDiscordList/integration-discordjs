@@ -142,7 +142,8 @@ app.use(express.json()); // everything else, after the webhook route
 ```
 
 The handler reads the raw stream itself, so mount it **before** any body
-parser. If your framework forces one in front, it must hand over raw bytes:
+parser. If your framework forces one in front, it must hand over raw bytes; a
+`Buffer` in `req.body` is verified as is:
 
 ```ts
 app.post('/webhooks/tdl', express.raw({ type: 'application/json' }), handler);
@@ -152,6 +153,9 @@ app.post('/webhooks/tdl', express.raw({ type: 'application/json' }), handler);
 and silently skips JSON, leaving `req.body` undefined. The handler detects an
 already-parsed body and reports a `BODY_CONSUMED` error rather than failing
 verification for reasons nobody can see.
+
+Both handlers, and `verifyWebhook`, throw a `TypeError` for an empty secret
+rather than checking signatures against an empty key.
 
 ### Hono, Next App Router, Workers, Bun, Deno
 
@@ -202,6 +206,7 @@ signature covers bytes, not meaning.
 ```ts
 type TdlWebhookEventName =
   | 'listing.bumped'
+  | 'listing.bump_ready' // the bump cooldown lifted; data.ready_at
   | 'listing.upvoted'
   | 'server.joined'   // server listings only — a bot listing never receives it
   | 'bot.added'
@@ -227,9 +232,9 @@ heartbeat's internal stats forward.
   and **a 2xx to that probe re-enables it**.
 - **Register an exact `https://` URL with no redirect.** The sender treats 3xx
   as a failure, so an `http → https` or trailing-slash redirect burns all five
-  retries and counts toward the disable streak.
+  attempts and counts toward the disable streak.
 - **Deduplicate on `ctx.delivery`.** It equals `X-TDL-Delivery` and is stable
-  across all five retries of one delivery:
+  across all five attempts of one delivery:
 
   ```ts
   if (await redis.set(ctx.delivery, 1, 'EX', 86400, 'NX') === null) return;

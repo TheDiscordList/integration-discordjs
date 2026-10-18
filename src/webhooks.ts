@@ -37,7 +37,7 @@ export interface TdlWebhookListing {
 }
 
 export interface TdlEnvelope<E extends string, D> {
-  /** UUID, equals `X-TDL-Delivery`, stable across all 5 retries. Idempotency key. */
+  /** UUID, equals `X-TDL-Delivery`, stable across all 5 attempts. Idempotency key. */
   id: string;
   event: E;
   /** Enqueue time, NOT send time. Do not use it for freshness. */
@@ -52,6 +52,9 @@ export type TdlWebhookPayload =
     bumped_at: TdlIsoDate;
     next_bump_at: TdlIsoDate;
     user: TdlWebhookUser | null;
+  }>
+  | TdlEnvelope<'listing.bump_ready', {
+    ready_at: TdlIsoDate;
   }>
   | TdlEnvelope<'listing.upvoted', {
     voted_at: TdlIsoDate;
@@ -90,6 +93,13 @@ export class TdlWebhookError extends Error {
   }
 }
 
+/** An empty key would make every signature computable by anyone, so it is a setup error. */
+function requireSecret(secret: string): void {
+  if (typeof secret !== 'string' || secret.trim() === '') {
+    throw new TypeError('A webhook secret is required.');
+  }
+}
+
 /** Length is not secret, and `timingSafeEqual` throws when lengths differ. */
 function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length || a.length === 0) return false;
@@ -111,7 +121,8 @@ export interface VerifyWebhookOptions {
  * and posts that same string, so `JSON.stringify(req.body)` re-escapes slashes
  * and non-ASCII and can never verify.
  *
- * @throws {TdlWebhookError} and nothing else.
+ * @throws {TdlWebhookError} when the delivery does not verify.
+ * @throws {TypeError} when `secret` is empty.
  */
 export function verifyWebhook(
   rawBody: string | Uint8Array,
@@ -119,6 +130,7 @@ export function verifyWebhook(
   secret: string,
   options: VerifyWebhookOptions = {},
 ): TdlWebhookPayload {
+  requireSecret(secret);
   const header = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
   if (!header) {
     throw new TdlWebhookError('MISSING_SIGNATURE', `Missing ${WEBHOOK_SIGNATURE_HEADER} header.`);
@@ -250,6 +262,7 @@ function verifyOptions(options: WebhookHandlerOptions): VerifyWebhookOptions {
 export function createFetchWebhookHandler(
   options: WebhookHandlerOptions,
 ): (request: Request) => Promise<Response> {
+  requireSecret(options.secret);
   return async (request) => {
     if (request.method !== 'POST') return new Response(null, { status: 405 });
 
@@ -276,7 +289,8 @@ export function createFetchWebhookHandler(
 
 /**
  * `node:http` and express/connect handler. It reads the stream itself, so it
- * must be mounted before any JSON body parser.
+ * must be mounted before any JSON body parser; a raw `Buffer` body from
+ * `express.raw()` is used as is.
  *
  * ```ts
  * app.post('/tdl', createWebhookHandler({ secret, onEvent }));
@@ -285,6 +299,7 @@ export function createFetchWebhookHandler(
 export function createWebhookHandler(
   options: WebhookHandlerOptions,
 ): (req: IncomingMessage & { body?: unknown }, res: ServerResponse) => void {
+  requireSecret(options.secret);
   return (req, res) => {
     void (async (): Promise<void> => {
       const end = (status: number): void => {
@@ -294,35 +309,40 @@ export function createWebhookHandler(
 
       if (req.method !== 'POST') return end(405);
 
-      // A body parser ran first and destroyed the raw bytes. Say so loudly:
-      // a silent verification failure here is hours of debugging.
-      if (req.body !== undefined) {
+      let raw: Uint8Array;
+      if (req.body instanceof Uint8Array) {
+        raw = req.body;
+        if (raw.byteLength > MAX_BODY_BYTES) return end(413);
+      } else if (req.body !== undefined) {
+        // A body parser ran first and destroyed the raw bytes. Say so loudly:
+        // a silent verification failure here is hours of debugging.
         options.onError?.(new TdlWebhookError(
           'BODY_CONSUMED',
           'Request body was already parsed, so the signed bytes are gone. Mount this handler '
           + "before any JSON body parser, or use express.raw({ type: 'application/json' }) on this route.",
         ));
         return end(500);
-      }
-
-      let size = 0;
-      const chunks: Buffer[] = [];
-      try {
-        for await (const chunk of req) {
-          const buf = Buffer.from(chunk as Buffer);
-          size += buf.length;
-          if (size > MAX_BODY_BYTES) return end(413);
-          chunks.push(buf);
+      } else {
+        let size = 0;
+        const chunks: Buffer[] = [];
+        try {
+          for await (const chunk of req) {
+            const buf = Buffer.from(chunk as Buffer);
+            size += buf.length;
+            if (size > MAX_BODY_BYTES) return end(413);
+            chunks.push(buf);
+          }
+        } catch (error) {
+          options.onError?.(error);
+          return end(400);
         }
-      } catch (error) {
-        options.onError?.(error);
-        return end(400);
+        raw = Buffer.concat(chunks);
       }
 
       let event: TdlWebhookPayload;
       try {
         event = verifyWebhook(
-          Buffer.concat(chunks),
+          raw,
           req.headers[WEBHOOK_SIGNATURE_HEADER],
           options.secret,
           verifyOptions(options),

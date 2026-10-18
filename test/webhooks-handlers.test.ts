@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createFetchWebhookHandler, createWebhookHandler } from '../src/webhooks.js';
+import { createFetchWebhookHandler, createWebhookHandler, MAX_BODY_BYTES } from '../src/webhooks.js';
 
 const SECRET = 'whsec_test';
 const DELIVERY = '5b1f0a2e-1f4d-4a51-9f26-2f9a9c0e1b77';
@@ -132,6 +132,13 @@ function nodeResponse(): ServerResponse & { done: Promise<number> } {
   return res as unknown as ServerResponse & { done: Promise<number> };
 }
 
+describe('a missing secret', () => {
+  it.each(['', '   '])('stops either handler from being built: %j', (secret) => {
+    expect(() => createWebhookHandler({ secret, onEvent: vi.fn() })).toThrow('secret is required');
+    expect(() => createFetchWebhookHandler({ secret, onEvent: vi.fn() })).toThrow('secret is required');
+  });
+});
+
 describe('createWebhookHandler', () => {
   it('reads the raw stream and returns 204', async () => {
     const onEvent = vi.fn();
@@ -143,6 +150,28 @@ describe('createWebhookHandler', () => {
       expect.objectContaining({ event: 'webhook.ping' }),
       { delivery: DELIVERY, attempt: 1 },
     );
+  });
+
+  // What express.raw({ type: 'application/json' }) leaves behind.
+  it('verifies a raw Buffer body a parser already read', async () => {
+    const onEvent = vi.fn();
+    const res = nodeResponse();
+    createWebhookHandler({ secret: SECRET, onEvent })(
+      nodeRequest(null, { body: Buffer.from(ping, 'utf8'), headers: { 'x-tdl-signature': signature(ping) } }),
+      res,
+    );
+
+    expect(await res.done).toBe(204);
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: 'webhook.ping' }), expect.anything());
+  });
+
+  it('refuses an oversized raw Buffer body', async () => {
+    const res = nodeResponse();
+    createWebhookHandler({ secret: SECRET, onEvent: vi.fn() })(
+      nodeRequest(null, { body: Buffer.alloc(MAX_BODY_BYTES + 1) }),
+      res,
+    );
+    expect(await res.done).toBe(413);
   });
 
   // express.raw() with no options defaults `type` to application/octet-stream

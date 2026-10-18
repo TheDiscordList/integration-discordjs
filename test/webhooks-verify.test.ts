@@ -44,6 +44,24 @@ describe('verifyWebhook', () => {
     expect(verifyWebhook(Buffer.from(body, 'utf8'), sign(body), SECRET, { now }).id).toBeTruthy();
   });
 
+  it('accepts a listing.bump_ready delivery and narrows its data', () => {
+    const ready = JSON.stringify({
+      id: '0c7c2f4e-8a0d-4bde-9d0e-5b8f6f1a2c3d',
+      event: 'listing.bump_ready',
+      created_at: '2026-08-14T12:34:56+00:00',
+      listing: { id: '1', type: 'bot', name: 'Test', url: 'https://thediscordlist.com/bots/1' },
+      data: { ready_at: '2026-08-14T12:34:56+00:00' },
+    });
+    const event = verifyWebhook(ready, sign(ready), SECRET, { now });
+    expect(event.event === 'listing.bump_ready' && event.data.ready_at).toBe('2026-08-14T12:34:56+00:00');
+  });
+
+  // An empty HMAC key would verify any delivery signed with an empty key.
+  it.each(['', '   '])('refuses to verify with an empty secret: %j', (secret) => {
+    expect(codeOf(() => verifyWebhook(body, sign(body, undefined, secret), secret, { now })))
+      .toBe('THREW_TypeError');
+  });
+
   it('rejects a wrong secret', () => {
     expect(codeOf(() => verifyWebhook(body, sign(body, undefined, 'whsec_other'), SECRET, { now })))
       .toBe('INVALID_SIGNATURE');
