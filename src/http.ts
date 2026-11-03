@@ -35,8 +35,10 @@ export interface ApiClient {
    * `nextTickInMs` is the time until the caller runs again. If a wait would
    * outlast it, the attempt is dropped: the next tick carries fresher data,
    * and a failed request still burns rate-limit budget.
+   *
+   * Aborting `signal` ends a wait and sends nothing more.
    */
-  post(path: string, body: unknown, priority: Priority, nextTickInMs?: number): Promise<Outcome>;
+  post(path: string, body: unknown, priority: Priority, nextTickInMs?: number, signal?: AbortSignal): Promise<Outcome>;
 }
 
 export interface ApiClientOptions {
@@ -97,10 +99,17 @@ function classify(status: number, body: unknown, retryAfterHeader: string | null
   return { kind: 'transient', status, error: new Error(`TheDiscordList responded ${status}.`) };
 }
 
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
     timer.unref?.();
+    signal?.addEventListener('abort', done);
+    if (signal?.aborted) done();
   });
 }
 
@@ -162,9 +171,12 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   }
 
   return {
-    async post(path, body, priority, nextTickInMs) {
+    async post(path, body, priority, nextTickInMs, signal) {
       let outcome: Outcome = { kind: 'dropped', status: null };
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // The caller stopped, so the body is a stale snapshot.
+        if (signal?.aborted) return { kind: 'dropped', status: null };
+
         // A request that just waited out the window goes through it, even if
         // its timer fires a tick early.
         outcome = await once(path, body, priority, priority === 'heartbeat' || outcome.kind === 'throttled');
@@ -172,7 +184,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
 
         const delay = outcome.kind === 'throttled' ? suspendedUntil[priority] - performance.now() : backoffMs(attempt);
         if (nextTickInMs !== undefined && delay >= nextTickInMs) break;
-        await sleep(delay);
+        await sleep(delay, signal);
       }
       return outcome;
     },

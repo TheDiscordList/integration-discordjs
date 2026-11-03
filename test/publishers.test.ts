@@ -88,6 +88,7 @@ describe('StatsPublisher', () => {
       { server_count: 2, shard_count: 1 },
       'normal',
       STATS_INTERVAL_MS,
+      expect.any(AbortSignal),
     );
     publisher.stop();
   });
@@ -198,6 +199,7 @@ describe('HeartbeatPublisher', () => {
       { cluster: 0, cluster_count: 1, shards: [{ id: 0, status: 'ready', latency_ms: 42, guilds: 2 }] },
       'heartbeat',
       30_000,
+      expect.any(AbortSignal),
     );
     publisher.stop();
   });
@@ -422,7 +424,7 @@ describe('CommandsPublisher', () => {
     await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS);
 
     expect(rest.get).toHaveBeenCalledWith('/applications/1/commands');
-    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands }, 'normal', undefined);
+    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands }, 'normal', undefined, expect.any(AbortSignal));
     publisher.stop();
   });
 
@@ -443,7 +445,7 @@ describe('CommandsPublisher', () => {
     );
 
     await publisher.post();
-    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands: [] }, 'normal', undefined);
+    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands: [] }, 'normal', undefined, expect.any(AbortSignal));
   });
 
   it('does nothing on a process that is not the elected publisher', async () => {

@@ -235,6 +235,26 @@ describe('autopost', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  // A beat sent after this would put the stale `ready` snapshot on the status page.
+  it('ends a retry wait when stop() lands during it, and sends nothing more', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient()), 'tok', { botId: '1' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockImplementation(async () => new Response('{}', { status: 500 }));
+    const beat = poster.postHeartbeat();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    poster.stop();
+    expect(await beat).toMatchObject({ ok: false, skipped: 'stopped' });
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('refuses a manual post after stop(), which is not restartable', async () => {
     const fetchMock = stubFetch();
     const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok');
