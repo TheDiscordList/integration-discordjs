@@ -194,4 +194,15 @@ describe('createWebhookHandler', () => {
     createWebhookHandler({ secret: SECRET, onEvent: vi.fn() })(nodeRequest(null, { method: 'GET' }), res);
     expect(await res.done).toBe(405);
   });
+
+  // vitest fails the run on an unhandled rejection, which is what used to happen here.
+  it('answers 500 when onError itself throws', async () => {
+    const boom = (): never => {
+      throw new Error('boom');
+    };
+    const res = nodeResponse();
+    createWebhookHandler({ secret: SECRET, onEvent: boom, onError: boom })(nodeRequest(ping), res);
+
+    expect(await res.done).toBe(500);
+  });
 });

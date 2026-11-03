@@ -357,6 +357,10 @@ export function createWebhookHandler(
         return Array.isArray(value) ? value[0] : value;
       }));
       end(status);
-    })();
+    })().catch(() => {
+      // Only a throwing onError lands here. Floating, it would kill the host.
+      res.statusCode = 500;
+      res.end();
+    });
   };
 }
