@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiClient, Outcome } from '../src/http.js';
 import {
   COMMANDS_DELAY_MS,
+  COMMANDS_RETRY_MS,
   CommandsPublisher,
   HEARTBEAT_OUT_OF_BAND_GAP_MS,
   HeartbeatPublisher,
@@ -435,5 +436,87 @@ describe('CommandsPublisher', () => {
 
     expect(await publisher.post()).toMatchObject({ ok: false, skipped: 'fetch-failed' });
     expect(emit.error).toHaveBeenCalled();
+  });
+
+  it.each<[string, Outcome]>([
+    ['a 5xx', { kind: 'transient', status: 502, error: new Error('Bad Gateway') }],
+    ['a connection failure', { kind: 'transient', status: null, error: new Error('ECONNRESET') }],
+    ['a client-side suspension', { kind: 'dropped', status: null }],
+    ['a 429 that outlasted its retries', { kind: 'throttled', status: 429, retryAfterMs: 1_000 }],
+  ])('tries again every 5 minutes after %s, until it lands', async (_name, failure) => {
+    const api = makeApi();
+    api.post.mockResolvedValueOnce(failure).mockResolvedValueOnce(failure);
+    const publisher = new CommandsPublisher(makeDeps({ api }), { get: vi.fn().mockResolvedValue(commands) });
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS);
+    expect(api.post).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(COMMANDS_RETRY_MS - 1);
+    expect(api.post).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.post).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(COMMANDS_RETRY_MS);
+    expect(api.post).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(COMMANDS_RETRY_MS * 3);
+    expect(api.post).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('tries again 5 minutes after Discord fails to list the commands', async () => {
+    const api = makeApi();
+    const rest = { get: vi.fn().mockRejectedValueOnce(new Error('Discord is down')).mockResolvedValue(commands) };
+    const publisher = new CommandsPublisher(makeDeps({ api }), rest);
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS);
+    expect(api.post).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(COMMANDS_RETRY_MS);
+    expect(api.post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, Outcome]>([
+    ['a 422', { kind: 'payload', status: 422 }],
+    ['a 401', { kind: 'auth', status: 401 }],
+    ['a 404', { kind: 'config', status: 404 }],
+    ['a 409', { kind: 'config', status: 409 }],
+  ])('stops at %s, which the same request would only get again', async (_name, failure) => {
+    const api = makeApi(failure);
+    const publisher = new CommandsPublisher(makeDeps({ api }), { get: vi.fn().mockResolvedValue(commands) });
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS + COMMANDS_RETRY_MS * 3);
+
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops when Discord lists no commands, since there is nothing to send', async () => {
+    const rest = { get: vi.fn().mockResolvedValue([]) };
+    const publisher = new CommandsPublisher(makeDeps(), rest);
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS + COMMANDS_RETRY_MS * 3);
+
+    expect(rest.get).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // The 403 is a plan gate that can lift mid-run, so it keeps its 30-minute reprobe.
+  it('reprobes after a 403 once the plan suspension ends', async () => {
+    const api = makeApi();
+    api.post.mockResolvedValueOnce({ kind: 'plan', status: 403 });
+    const publisher = new CommandsPublisher(makeDeps({ api }), { get: vi.fn().mockResolvedValue(commands) });
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS + COMMANDS_RETRY_MS * 5);
+    expect(api.post).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(COMMANDS_RETRY_MS);
+    expect(api.post).toHaveBeenCalledTimes(2);
   });
 });

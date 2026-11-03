@@ -28,6 +28,7 @@ const BEAT_NOW_DELAY_MS = 1_000;
 
 /** Offset from the stats post: the two share one server-side rate budget. */
 export const COMMANDS_DELAY_MS = 10_000;
+export const COMMANDS_RETRY_MS = 300_000;
 
 /** The Gold tier is derived per request from Stripe, so it can flip mid-run. */
 export const PLAN_REPROBE_MS = 1_800_000;
@@ -467,10 +468,17 @@ export class CommandsPublisher extends Publisher {
     super(deps);
   }
 
-  /** Once, ~10s after ready. Commands change on deploy, and a deploy is a restart. */
+  /**
+   * Once, ~10s after ready. Commands change on deploy, and a deploy is a restart,
+   * so a post that fails would otherwise leave them stale until the next one.
+   */
   start(): void {
     if (!this.deps.topology.isStatsPublisher) return;
-    this.schedule(COMMANDS_DELAY_MS, () => this.publish());
+    this.schedule(COMMANDS_DELAY_MS, () => this.attempt());
+  }
+
+  private async attempt(): Promise<void> {
+    if (worthRetrying(await this.publish())) this.schedule(COMMANDS_RETRY_MS, () => this.attempt());
   }
 
   async post(): Promise<PostResult> {
@@ -507,4 +515,11 @@ export class CommandsPublisher extends Publisher {
     // published spec types as strings and the server accepts.
     return this.send(`/bots/${this.deps.botId}/commands`, { commands: raw }, 'normal');
   }
+}
+
+/** A success, nothing to send, or a 4xx that the same request would only get again end it. */
+function worthRetrying({ ok, status, skipped }: PostResult): boolean {
+  if (ok || skipped === 'empty' || skipped === 'disabled') return false;
+  if (skipped !== undefined) return true;
+  return status === null || status < 400 || status >= 500 || status === 408 || status === 425;
 }

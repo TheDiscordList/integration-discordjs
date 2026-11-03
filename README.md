@@ -31,7 +31,7 @@ It starts three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild join/leave |
 | Heartbeat | per-shard status, latency and guild counts | every ~30s, plus soon after any shard transition |
-| Commands | your registered slash commands | once, ~10s after ready |
+| Commands | your registered slash commands | once, ~10s after ready, retried every 5 min if that fails |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
@@ -50,7 +50,9 @@ takes down a deploy. A token pasted with surrounding whitespace or a leading
   third of the server's grace window and kept within 15–60s. A shard
   transition beats out of band, at least 10s after the previous beat; it never
   moves the regular schedule.
-- **Commands:** once, 10s after ready.
+- **Commands:** once, 10s after ready. A `5xx`, a network error, a rate-limit
+  suspension or a failed fetch from Discord tries again every 5 minutes, until
+  it succeeds or gets a `4xx` that retrying cannot fix.
 - **A `403`** (the endpoint needs a higher plan) pauses that publisher for 30
   minutes, then it tries again.
 - **Requests** time out after 10s and get three attempts, backing off
