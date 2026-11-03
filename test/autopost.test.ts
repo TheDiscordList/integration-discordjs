@@ -219,4 +219,21 @@ describe('autopost', () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://thediscordlist.com/api/bots/42/heartbeat');
     poster.stop();
   });
+
+  // `shards: 'auto'` fills ws.shards at connect, so a count read before login says 1.
+  it('re-detects the shard count on ready when botId built it before login', async () => {
+    const fetchMock = stubFetch();
+    const shards = new Map<number, unknown>();
+    const client = fakeClient({ ws: { shards } });
+    const poster = autopost(start(client), 'tok', { botId: '42' });
+
+    shards.set(0, { id: 0, status: Status.Ready, ping: 30 });
+    shards.set(1, { id: 1, status: Status.Ready, ping: 30 });
+    client.fire(Events.ClientReady);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const stats = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/stats')) as [string, RequestInit];
+    expect(JSON.parse(String(stats[1].body))).toMatchObject({ shard_count: 2 });
+    poster.stop();
+  });
 });

@@ -107,7 +107,7 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
   private readonly detach: Array<() => void> = [];
   private readonly warned = new Set<string>();
   private stopped = false;
-  private built = false;
+  private deps: PublisherDeps | undefined;
   private heartbeatStarted = false;
 
   /** @internal */
@@ -132,11 +132,16 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
 
   /** @internal */
   build(client: Client, api: ApiClient, options: AutopostOptions, botId: string): void {
-    if (this.stopped || this.built) return;
-    this.built = true;
+    if (this.stopped) return;
 
     const structural = client as unknown as ClientLike;
     const topology = detectTopology(structural, options.cluster);
+    if (this.deps) {
+      // Built before login, when `ws.shards` was still empty. Publishers read this on every run.
+      this.deps.topology = topology;
+      return;
+    }
+
     const deps: PublisherDeps = {
       api,
       client: structural,
@@ -145,6 +150,7 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
       emit: this.emitter,
       onAuthFailure: () => this.stopPublishers(),
     };
+    this.deps = deps;
 
     if (options.stats?.enabled !== false) {
       this.stats = new StatsPublisher(deps, {
