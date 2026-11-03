@@ -168,6 +168,22 @@ describe('autopost', () => {
     poster.stop();
   });
 
+  it('keeps beating when a posted listener throws', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok', {
+      stats: { enabled: false },
+      commands: { enabled: false },
+    });
+    poster.on('posted', () => {
+      throw new Error('boom');
+    });
+
+    await vi.advanceTimersByTimeAsync(36_000);
+
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+    poster.stop();
+  });
+
   it('stop() clears every timer and detaches every client listener', () => {
     stubFetch();
     const client = fakeClient({ isReady: () => true });

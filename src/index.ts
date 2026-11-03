@@ -112,10 +112,19 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
 
   /** @internal */
   readonly emitter: PublisherEmitter = {
-    posted: (payload) => this.emit('posted', payload),
-    error: (error) => this.safeEmitError(error),
-    disabled: (payload) => this.emit('disabled', payload),
+    posted: (payload) => this.guarded(() => this.emit('posted', payload)),
+    error: (error) => this.guarded(() => this.safeEmitError(error)),
+    disabled: (payload) => this.guarded(() => this.emit('disabled', payload)),
   };
+
+  /** A listener runs inside a publisher, so one that throws would end its loop. */
+  private guarded(emit: () => void): void {
+    try {
+      emit();
+    } catch (error) {
+      console.warn(`${LOG_PREFIX} an event listener threw:`, error);
+    }
+  }
 
   /** Node throws on an unhandled `'error'` event; a transient 502 must never kill the host. */
   private safeEmitError(error: PublisherError): void {
