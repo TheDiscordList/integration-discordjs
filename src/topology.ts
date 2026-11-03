@@ -194,6 +194,10 @@ export async function measureServerCount(
   topology: Topology,
   getServerCount?: () => number | Promise<number>,
 ): Promise<number | null> {
+  // Before the callback too: every cluster posting at +5s burns the per-bot
+  // budget, and cluster 0's commands post gets suspended along with them.
+  if (!topology.isStatsPublisher) return null;
+
   if (getServerCount) {
     try {
       const value = await getServerCount();
@@ -208,8 +212,6 @@ export async function measureServerCount(
   // outage, because GUILD_DELETE with `unavailable: true` only flips a flag.
   // So a local read needs no sanity backstop.
   if (topology.kind === 'single' || topology.kind === 'internal') return client.guilds.cache.size;
-
-  if (!topology.isStatsPublisher) return null;
 
   const bus = aggregationBus(client);
   if (!bus) return null;

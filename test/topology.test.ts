@@ -273,4 +273,11 @@ describe('measureServerCount', () => {
     expect(await measureServerCount(fakeClient(), managed({ clusterId: 2, isStatsPublisher: false }), undefined))
       .toBeNull();
   });
+
+  it('does not ask getServerCount on a process that is not the elected publisher', async () => {
+    const getServerCount = vi.fn(() => 1234);
+    expect(await measureServerCount(fakeClient(), managed({ clusterId: 2, isStatsPublisher: false }), getServerCount))
+      .toBeNull();
+    expect(getServerCount).not.toHaveBeenCalled();
+  });
 });

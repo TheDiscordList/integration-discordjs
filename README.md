@@ -75,7 +75,7 @@ client, and every layout is covered:
 | `ShardingManager` | `broadcastEval` sum | shard 0 | every shard, for itself |
 | discord-hybrid-sharding | `cluster.broadcastEval` sum | cluster 0 | every cluster, for itself |
 | indomitable | the local cache (warns once) | cluster 0 | every cluster, for itself |
-| something else | your `getServerCount()` | as configured | as configured |
+| something else | your `getServerCount()` | cluster 0 | every cluster, for itself |
 
 Every process heartbeats for **itself** on purpose. A manager reporting "all
 fine" for a cluster whose host has died is exactly the failure the status page
