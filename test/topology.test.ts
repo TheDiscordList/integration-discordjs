@@ -64,9 +64,18 @@ describe('collectShards', () => {
 
     expect(collectShards(client)).toEqual([
       { id: 0, status: 'ready', latency_ms: 42, guilds: 1 },
-      { id: 1, status: 'resuming', latency_ms: 80, guilds: 2 },
+      { id: 1, status: 'resuming', latency_ms: 80 },
     ]);
   });
+
+  // A restart's first `connecting` beat would otherwise zero the public count.
+  it.each([Status.Connecting, Status.Idle, Status.Resuming, Status.Disconnected])(
+    'omits guilds from a shard in status %i',
+    (status) => {
+      const client = fakeClient({ ws: { shards: new Map([[0, { id: 0, status, ping: -1 }]]) } });
+      expect(collectShards(client)[0]).not.toHaveProperty('guilds');
+    },
+  );
 
   // ping is -1 before the first heartbeat ACK and the API minimum is 0, so the
   // key must be absent rather than negative.
@@ -241,6 +250,16 @@ describe('measureServerCount', () => {
       .toBeNull();
   });
 
+  it('sums indomitable clusters, whose client.shard names the count clusterCount', async () => {
+    const client = fakeClient({
+      shard: {
+        clusterCount: 2,
+        broadcastEval: vi.fn().mockResolvedValue([{ ready: true, g: 10 }, { ready: true, g: 20 }]),
+      },
+    });
+    expect(await measureServerCount(client, managed({ kind: 'indomitable', clusterCount: 2 }), undefined)).toBe(30);
+  });
+
   it('returns null when fewer shards answer than expected', async () => {
     const client = fakeClient({
       shard: { ids: [0], count: 3, broadcastEval: vi.fn().mockResolvedValue([{ ready: true, g: 10 }]) },
@@ -263,5 +282,12 @@ describe('measureServerCount', () => {
   it('returns null when this process is not the elected publisher', async () => {
     expect(await measureServerCount(fakeClient(), managed({ clusterId: 2, isStatsPublisher: false }), undefined))
       .toBeNull();
+  });
+
+  it('does not ask getServerCount on a process that is not the elected publisher', async () => {
+    const getServerCount = vi.fn(() => 1234);
+    expect(await measureServerCount(fakeClient(), managed({ clusterId: 2, isStatsPublisher: false }), getServerCount))
+      .toBeNull();
+    expect(getServerCount).not.toHaveBeenCalled();
   });
 });

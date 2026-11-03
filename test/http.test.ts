@@ -185,6 +185,20 @@ describe('retries', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('leaves stats and commands alone on a heartbeat 429, and waits out its window', async () => {
+    const fetchMock = mockFetch(json(429, {}, { 'retry-after': '1' }));
+    const client = createApiClient(OPTS);
+
+    const beat = client.post('/bots/1/heartbeat', {}, 'heartbeat', 600_000);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((await client.post('/bots/1/stats', {}, 'normal')).kind).toBe('ok');
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((await beat).kind).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('honours an X-RateLimit-Reset later than Retry-After', async () => {
     const reset = String(Math.floor(Date.now() / 1000) + 120);
     mockFetch(json(429, {}, { 'retry-after': '1', 'x-ratelimit-reset': reset }));

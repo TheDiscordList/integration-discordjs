@@ -31,7 +31,7 @@ It starts three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild join/leave |
 | Heartbeat | per-shard status, latency and guild counts | every ~30s, plus soon after any shard transition |
-| Commands | your registered slash commands | once, ~10s after ready |
+| Commands | your registered slash commands | once, ~10s after ready, retried every 5 min if that fails |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
@@ -50,7 +50,9 @@ takes down a deploy. A token pasted with surrounding whitespace or a leading
   third of the server's grace window and kept within 15–60s. A shard
   transition beats out of band, at least 10s after the previous beat; it never
   moves the regular schedule.
-- **Commands:** once, 10s after ready.
+- **Commands:** once, 10s after ready. A `5xx`, a network error, a rate-limit
+  suspension or a failed fetch from Discord tries again every 5 minutes, until
+  it succeeds or gets a `4xx` that retrying cannot fix.
 - **A `403`** (the endpoint needs a higher plan) pauses that publisher for 30
   minutes, then it tries again.
 - **Requests** time out after 10s and get three attempts, backing off
@@ -72,8 +74,8 @@ client, and every layout is covered:
 | Internal sharding | the local guild cache | this process | this process |
 | `ShardingManager` | `broadcastEval` sum | shard 0 | every shard, for itself |
 | discord-hybrid-sharding | `cluster.broadcastEval` sum | cluster 0 | every cluster, for itself |
-| indomitable | the local cache (warns once) | cluster 0 | every cluster, for itself |
-| something else | your `getServerCount()` | as configured | as configured |
+| indomitable | `client.shard.broadcastEval` sum | cluster 0 | every cluster, for itself |
+| something else | your `getServerCount()` | cluster 0 | every cluster, for itself |
 
 Every process heartbeats for **itself** on purpose. A manager reporting "all
 fine" for a cluster whose host has died is exactly the failure the status page
@@ -110,9 +112,9 @@ autopost(client, token, {
 });
 ```
 
-`minGap` is a hard floor between two stats POSTs. A join storm, a mass
-reconnect and a manual `postStats()` all route through it, so the ceiling is
-structurally one request per minute.
+`minGap` is a hard floor between two stats POSTs, and can only be raised above
+its 60s default. A join storm, a mass reconnect and a manual `postStats()` all
+route through it, so the ceiling is structurally one request per minute.
 
 `commands.postEmpty` is `false` because posting an empty array **clears** the
 command list on your listing. Turn it on only if that is what you mean.
@@ -140,6 +142,9 @@ unhandled `'error'`.
 
 An explicit `postX()` also re-arms a publisher that disabled itself, so you can
 retry after fixing a token or a listing id without restarting.
+
+`stop()` clears every timer and detaches every listener; `client.destroy()` does
+the same.
 
 ## Webhooks
 
@@ -276,10 +281,11 @@ heartbeat's internal stats forward.
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
-  budget per bot (60/min; heartbeats have their own 120/min). A `429` suspends
-  stats and commands together for `Retry-After` (or until `X-RateLimit-Reset`,
-  at most an hour); heartbeats bypass it — a stale number beats a false "down"
-  on your status page.
+  budget per bot (60/min; heartbeats have a limit of their own). A `429` on
+  either suspends stats and commands together for `Retry-After` (or until
+  `X-RateLimit-Reset`, at most an hour); heartbeats bypass it, and their own
+  `429` suspends nothing — a stale number beats a false "down" on your status
+  page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing. The distinction is deliberate, so probing cannot enumerate.
 - **Guild counts can drift upward permanently.** If Discord re-IDENTIFYs a

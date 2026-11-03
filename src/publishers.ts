@@ -28,6 +28,7 @@ const BEAT_NOW_DELAY_MS = 1_000;
 
 /** Offset from the stats post: the two share one server-side rate budget. */
 export const COMMANDS_DELAY_MS = 10_000;
+export const COMMANDS_RETRY_MS = 300_000;
 
 /** The Gold tier is derived per request from Stripe, so it can flip mid-run. */
 export const PLAN_REPROBE_MS = 1_800_000;
@@ -79,6 +80,8 @@ abstract class Publisher {
   protected timer: ReturnType<typeof setTimeout> | undefined;
   protected disabledReason: string | undefined;
   protected suspendedUntil = 0;
+  /** Aborted by `stop()`, which also ends a request's retry wait. */
+  private running = new AbortController();
   private readonly reported = new Set<number>();
 
   constructor(protected readonly deps: PublisherDeps) {}
@@ -86,11 +89,14 @@ abstract class Publisher {
   abstract start(): void;
 
   stop(): void {
+    this.running.abort();
     this.clear();
   }
 
   /** Chained `setTimeout`, never `setInterval`. Always unref'd. */
   protected schedule(delayMs: number, run: () => unknown): void {
+    // A post in flight when stop() landed must not re-arm the loop on its way out.
+    if (this.running.signal.aborted) return;
     this.clear();
     this.timer = setTimeout(() => {
       // Nothing may throw out of a timer.
@@ -138,7 +144,7 @@ abstract class Publisher {
     priority: Priority,
     nextTickInMs?: number,
   ): Promise<PostResult> {
-    return this.react(await this.deps.api.post(path, body, priority, nextTickInMs));
+    return this.react(await this.deps.api.post(path, body, priority, nextTickInMs, this.running.signal));
   }
 
   protected react(outcome: Outcome): PostResult {
@@ -148,7 +154,7 @@ abstract class Publisher {
         return { ok: true, status: outcome.status };
 
       case 'dropped':
-        return { ok: false, status: null, skipped: 'suspended' };
+        return { ok: false, status: null, skipped: this.running.signal.aborted ? 'stopped' : 'suspended' };
 
       case 'payload':
         // The publisher stays enabled — the next tick may carry valid data.
@@ -197,6 +203,7 @@ abstract class Publisher {
 
   /** An explicit `postX()` re-arms a disabled publisher. A restart is the other way. */
   protected rearm(): void {
+    if (this.running.signal.aborted) this.running = new AbortController();
     this.disabledReason = undefined;
   }
 }
@@ -226,7 +233,7 @@ export class StatsPublisher extends Publisher {
     super(deps);
     this.interval = options.interval ?? STATS_INTERVAL_MS;
     this.debounce = options.debounce ?? STATS_DEBOUNCE_MS;
-    this.minGap = options.minGap ?? STATS_MIN_GAP_MS;
+    this.minGap = Math.max(options.minGap || 0, STATS_MIN_GAP_MS);
     this.getServerCount = options.getServerCount;
   }
 
@@ -283,9 +290,8 @@ export class StatsPublisher extends Publisher {
       }
 
       const shardCount = this.deps.topology.shardCount;
-      // Every /stats post re-indexes Scout, evaluates achievements and fires a
-      // bot.stats_reported webhook even when the number did not move. There is
-      // no server-side dedupe, so the skip has to happen here.
+      // The server keeps an unchanged count from re-indexing or firing a webhook,
+      // but the request still spends the budget stats and commands share.
       if (
         count === this.lastCount
         && shardCount === this.lastShardCount
@@ -361,11 +367,15 @@ export class HeartbeatPublisher extends Publisher {
   }
 
   async post(): Promise<PostResult> {
+    const wasDisabled = this.disabledReason !== undefined;
     this.rearm();
     if (this.deps.topology.clusterCount === null) {
       return { ok: false, status: null, skipped: 'cluster-count-unknown' };
     }
-    return this.beat(true);
+    const result = await this.beat(true);
+    // A disable ended the loop, and a manual beat does not schedule the next one.
+    if (wasDisabled && this.disabledReason === undefined) this.scheduleNext();
+    return result;
   }
 
   private async tick(): Promise<void> {
@@ -375,7 +385,11 @@ export class HeartbeatPublisher extends Publisher {
 
   private async beat(manual: boolean): Promise<PostResult> {
     if (!manual && this.disabledReason !== undefined) return { ok: false, status: null, skipped: 'disabled' };
-    if (this.inFlight) return { ok: false, status: null, skipped: 'in-flight' };
+    if (this.inFlight) {
+      // The beat in flight may be manual, and that one schedules nothing.
+      if (!manual) this.scheduleNext();
+      return { ok: false, status: null, skipped: 'in-flight' };
+    }
 
     const clusterCount = this.deps.topology.clusterCount;
     if (clusterCount === null) return { ok: false, status: null, skipped: 'cluster-count-unknown' };
@@ -467,15 +481,25 @@ export class CommandsPublisher extends Publisher {
     super(deps);
   }
 
-  /** Once, ~10s after ready. Commands change on deploy, and a deploy is a restart. */
+  /**
+   * Once, ~10s after ready. Commands change on deploy, and a deploy is a restart,
+   * so a post that fails would otherwise leave them stale until the next one.
+   */
   start(): void {
     if (!this.deps.topology.isStatsPublisher) return;
-    this.schedule(COMMANDS_DELAY_MS, () => this.publish());
+    this.schedule(COMMANDS_DELAY_MS, () => this.attempt());
+  }
+
+  private async attempt(): Promise<void> {
+    if (worthRetrying(await this.publish())) this.schedule(COMMANDS_RETRY_MS, () => this.attempt());
   }
 
   async post(): Promise<PostResult> {
     this.rearm();
-    return this.publish();
+    const result = await this.publish();
+    // A pending retry would only post the same list again.
+    if (result.ok) this.clear();
+    return result;
   }
 
   private async publish(): Promise<PostResult> {
@@ -505,6 +529,13 @@ export class CommandsPublisher extends Publisher {
     // Forwarded verbatim. Client-side validation would be actively harmful:
     // Discord sends numbers for INTEGER and NUMBER choice values, which the
     // published spec types as strings and the server accepts.
-    return this.send(`/bots/${this.deps.botId}/commands`, { commands: raw }, 'normal');
+    return this.send(`/bots/${this.deps.botId}/commands`, { commands: raw }, 'normal', COMMANDS_RETRY_MS);
   }
+}
+
+/** A success, nothing to send, or a 4xx that the same request would only get again end it. */
+function worthRetrying({ ok, status, skipped }: PostResult): boolean {
+  if (ok || skipped === 'empty' || skipped === 'disabled') return false;
+  if (skipped !== undefined) return true;
+  return status === null || status < 400 || status >= 500 || status === 408 || status === 425;
 }

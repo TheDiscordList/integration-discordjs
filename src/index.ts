@@ -66,7 +66,7 @@ export interface AutopostOptions {
     interval?: number | undefined;
     /** Trailing debounce after guildCreate/guildDelete. Default: {@link STATS_DEBOUNCE_MS}. */
     debounce?: number | undefined;
-    /** Hard floor between two POSTs. Default: {@link STATS_MIN_GAP_MS}. */
+    /** Hard floor between two POSTs, never below the default. Default: {@link STATS_MIN_GAP_MS}. */
     minGap?: number | undefined;
   } | undefined;
 
@@ -107,15 +107,24 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
   private readonly detach: Array<() => void> = [];
   private readonly warned = new Set<string>();
   private stopped = false;
-  private built = false;
+  private deps: PublisherDeps | undefined;
   private heartbeatStarted = false;
 
   /** @internal */
   readonly emitter: PublisherEmitter = {
-    posted: (payload) => this.emit('posted', payload),
-    error: (error) => this.safeEmitError(error),
-    disabled: (payload) => this.emit('disabled', payload),
+    posted: (payload) => this.guarded(() => this.emit('posted', payload)),
+    error: (error) => this.guarded(() => this.safeEmitError(error)),
+    disabled: (payload) => this.guarded(() => this.emit('disabled', payload)),
   };
+
+  /** A listener runs inside a publisher, so one that throws would end its loop. */
+  private guarded(emit: () => void): void {
+    try {
+      emit();
+    } catch (error) {
+      console.warn(`${LOG_PREFIX} an event listener threw:`, error);
+    }
+  }
 
   /** Node throws on an unhandled `'error'` event; a transient 502 must never kill the host. */
   private safeEmitError(error: PublisherError): void {
@@ -132,11 +141,16 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
 
   /** @internal */
   build(client: Client, api: ApiClient, options: AutopostOptions, botId: string): void {
-    if (this.stopped || this.built) return;
-    this.built = true;
+    if (this.stopped) return;
 
     const structural = client as unknown as ClientLike;
     const topology = detectTopology(structural, options.cluster);
+    if (this.deps) {
+      // Built before login, when `ws.shards` was still empty. Publishers read this on every run.
+      this.deps.topology = topology;
+      return;
+    }
+
     const deps: PublisherDeps = {
       api,
       client: structural,
@@ -145,6 +159,7 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
       emit: this.emitter,
       onAuthFailure: () => this.stopPublishers(),
     };
+    this.deps = deps;
 
     if (options.stats?.enabled !== false) {
       this.stats = new StatsPublisher(deps, {
@@ -226,15 +241,15 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
   }
 
   postStats(): Promise<PostResult> {
-    return this.stats?.post() ?? Promise.resolve(DISABLED);
+    return (!this.stopped && this.stats?.post()) || Promise.resolve(DISABLED);
   }
 
   postHeartbeat(): Promise<PostResult> {
-    return this.heartbeat?.post() ?? Promise.resolve(DISABLED);
+    return (!this.stopped && this.heartbeat?.post()) || Promise.resolve(DISABLED);
   }
 
   postCommands(): Promise<PostResult> {
-    return this.commands?.post() ?? Promise.resolve(DISABLED);
+    return (!this.stopped && this.commands?.post()) || Promise.resolve(DISABLED);
   }
 
   /** Clears every timer and detaches every client listener. Not restartable. */
@@ -293,6 +308,14 @@ export function autopost(
     token: cleaned,
     userAgent: `@thediscordlist/discord.js/${version} (discord.js ${discordJsVersion})`,
   });
+
+  // discord.js has no shutdown event. A destroy closes the socket with 1000, which it treats as
+  // recoverable, so the shards would read as reconnecting and keep beating for good.
+  const destroy = client.destroy.bind(client);
+  client.destroy = () => {
+    poster.stop();
+    return destroy();
+  };
 
   // With an explicit botId the heartbeat can start before login, so a booting
   // bot reports "connecting" rather than looking dead on its status page.

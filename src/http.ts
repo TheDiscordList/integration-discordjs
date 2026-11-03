@@ -3,15 +3,18 @@
  *
  * There is a single client-side suspension rather than one per endpoint,
  * because the server counts stats and commands against one per-bot budget.
- * Heartbeats bypass it: a
- * dropped stats post is a stale number, a dropped heartbeat is a false "down"
- * on the user's public status page.
+ * Heartbeats have a limiter of their own, so their 429 leaves it alone, and they
+ * bypass it: a dropped stats post is a stale number, a dropped heartbeat is a
+ * false "down" on the user's public status page.
  */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 /** However far out Retry-After or X-RateLimit-Reset points, never go quiet for longer. */
 export const MAX_RATE_LIMIT_WAIT_MS = 3_600_000;
+/** When a 429 carries no usable Retry-After. */
+export const RATE_LIMIT_DEFAULT_MS = 60_000;
+export const RATE_LIMIT_JITTER_MS = 2_000;
 
-const MAX_ATTEMPTS = 3;
+export const MAX_ATTEMPTS = 3;
 
 export type Outcome =
   | { kind: 'ok'; status: number; body: unknown }
@@ -32,8 +35,10 @@ export interface ApiClient {
    * `nextTickInMs` is the time until the caller runs again. If a wait would
    * outlast it, the attempt is dropped: the next tick carries fresher data,
    * and a failed request still burns rate-limit budget.
+   *
+   * Aborting `signal` ends a wait and sends nothing more.
    */
-  post(path: string, body: unknown, priority: Priority, nextTickInMs?: number): Promise<Outcome>;
+  post(path: string, body: unknown, priority: Priority, nextTickInMs?: number, signal?: AbortSignal): Promise<Outcome>;
 }
 
 export interface ApiClientOptions {
@@ -86,7 +91,7 @@ function classify(status: number, body: unknown, retryAfterHeader: string | null
     return {
       kind: 'throttled',
       status: 429,
-      retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 60_000,
+      retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : RATE_LIMIT_DEFAULT_MS,
     };
   }
   // Retrying the same request cannot turn any other 4xx into a success.
@@ -94,10 +99,17 @@ function classify(status: number, body: unknown, retryAfterHeader: string | null
   return { kind: 'transient', status, error: new Error(`TheDiscordList responded ${status}.`) };
 }
 
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
     timer.unref?.();
+    signal?.addEventListener('abort', done);
+    if (signal?.aborted) done();
   });
 }
 
@@ -105,10 +117,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
   // Instance state, never module state: a dual ESM+CJS package loaded in both
   // formats would otherwise share one budget across two unrelated posters.
-  let suspendedUntil = 0;
+  const suspendedUntil: Record<Priority, number> = { normal: 0, heartbeat: 0 };
 
-  async function once(path: string, body: unknown, ignoreLimit: boolean): Promise<Outcome> {
-    if (!ignoreLimit && performance.now() < suspendedUntil) {
+  async function once(path: string, body: unknown, priority: Priority, ignoreLimit: boolean): Promise<Outcome> {
+    if (!ignoreLimit && performance.now() < suspendedUntil.normal) {
       return { kind: 'dropped', status: null };
     }
 
@@ -151,25 +163,28 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       // An absolute unix time, so it is read against the wall clock once.
       const reset = Number(response.headers.get('x-ratelimit-reset'));
       const untilReset = Number.isFinite(reset) && reset > 0 ? reset * 1000 - Date.now() : 0;
-      suspendedUntil = performance.now()
+      suspendedUntil[priority] = performance.now()
         + Math.min(Math.max(outcome.retryAfterMs, untilReset), MAX_RATE_LIMIT_WAIT_MS)
-        + Math.round(Math.random() * 2000);
+        + Math.round(Math.random() * RATE_LIMIT_JITTER_MS);
     }
     return outcome;
   }
 
   return {
-    async post(path, body, priority, nextTickInMs) {
+    async post(path, body, priority, nextTickInMs, signal) {
       let outcome: Outcome = { kind: 'dropped', status: null };
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // The caller stopped, so the body is a stale snapshot.
+        if (signal?.aborted) return { kind: 'dropped', status: null };
+
         // A request that just waited out the window goes through it, even if
         // its timer fires a tick early.
-        outcome = await once(path, body, priority === 'heartbeat' || outcome.kind === 'throttled');
+        outcome = await once(path, body, priority, priority === 'heartbeat' || outcome.kind === 'throttled');
         if (!isRetryable(outcome) || attempt === MAX_ATTEMPTS - 1) break;
 
-        const delay = outcome.kind === 'throttled' ? suspendedUntil - performance.now() : backoffMs(attempt);
+        const delay = outcome.kind === 'throttled' ? suspendedUntil[priority] - performance.now() : backoffMs(attempt);
         if (nextTickInMs !== undefined && delay >= nextTickInMs) break;
-        await sleep(delay);
+        await sleep(delay, signal);
       }
       return outcome;
     },
