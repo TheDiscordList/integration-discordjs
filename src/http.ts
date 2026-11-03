@@ -10,8 +10,11 @@
 export const DEFAULT_TIMEOUT_MS = 10_000;
 /** However far out Retry-After or X-RateLimit-Reset points, never go quiet for longer. */
 export const MAX_RATE_LIMIT_WAIT_MS = 3_600_000;
+/** When a 429 carries no usable Retry-After. */
+export const RATE_LIMIT_DEFAULT_MS = 60_000;
+export const RATE_LIMIT_JITTER_MS = 2_000;
 
-const MAX_ATTEMPTS = 3;
+export const MAX_ATTEMPTS = 3;
 
 export type Outcome =
   | { kind: 'ok'; status: number; body: unknown }
@@ -86,7 +89,7 @@ function classify(status: number, body: unknown, retryAfterHeader: string | null
     return {
       kind: 'throttled',
       status: 429,
-      retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 60_000,
+      retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : RATE_LIMIT_DEFAULT_MS,
     };
   }
   // Retrying the same request cannot turn any other 4xx into a success.
@@ -153,7 +156,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       const untilReset = Number.isFinite(reset) && reset > 0 ? reset * 1000 - Date.now() : 0;
       suspendedUntil[priority] = performance.now()
         + Math.min(Math.max(outcome.retryAfterMs, untilReset), MAX_RATE_LIMIT_WAIT_MS)
-        + Math.round(Math.random() * 2000);
+        + Math.round(Math.random() * RATE_LIMIT_JITTER_MS);
     }
     return outcome;
   }
