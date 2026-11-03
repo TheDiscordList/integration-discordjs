@@ -232,15 +232,15 @@ export class Autoposter extends EventEmitter<AutoposterEvents> {
   }
 
   postStats(): Promise<PostResult> {
-    return this.stats?.post() ?? Promise.resolve(DISABLED);
+    return (!this.stopped && this.stats?.post()) || Promise.resolve(DISABLED);
   }
 
   postHeartbeat(): Promise<PostResult> {
-    return this.heartbeat?.post() ?? Promise.resolve(DISABLED);
+    return (!this.stopped && this.heartbeat?.post()) || Promise.resolve(DISABLED);
   }
 
   postCommands(): Promise<PostResult> {
-    return this.commands?.post() ?? Promise.resolve(DISABLED);
+    return (!this.stopped && this.commands?.post()) || Promise.resolve(DISABLED);
   }
 
   /** Clears every timer and detaches every client listener. Not restartable. */

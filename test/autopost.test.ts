@@ -180,6 +180,36 @@ describe('autopost', () => {
     expect(client.off).toHaveBeenCalled();
   });
 
+  it('stays stopped when stop() lands while a post is in flight', async () => {
+    let answer: (response: Response) => void = () => undefined;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      answer = resolve;
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok', { heartbeat: { enabled: false } });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    poster.stop();
+    answer(new Response('{}', { status: 200 }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('refuses a manual post after stop(), which is not restartable', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok');
+    poster.stop();
+
+    expect(await poster.postStats()).toMatchObject({ skipped: 'disabled' });
+    expect(await poster.postHeartbeat()).toMatchObject({ skipped: 'disabled' });
+    expect(await poster.postCommands()).toMatchObject({ skipped: 'disabled' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('sends a user agent naming both packages', async () => {
     const fetchMock = stubFetch();
     const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok');

@@ -80,6 +80,7 @@ abstract class Publisher {
   protected timer: ReturnType<typeof setTimeout> | undefined;
   protected disabledReason: string | undefined;
   protected suspendedUntil = 0;
+  private stopped = false;
   private readonly reported = new Set<number>();
 
   constructor(protected readonly deps: PublisherDeps) {}
@@ -87,11 +88,14 @@ abstract class Publisher {
   abstract start(): void;
 
   stop(): void {
+    this.stopped = true;
     this.clear();
   }
 
   /** Chained `setTimeout`, never `setInterval`. Always unref'd. */
   protected schedule(delayMs: number, run: () => unknown): void {
+    // A post in flight when stop() landed must not re-arm the loop on its way out.
+    if (this.stopped) return;
     this.clear();
     this.timer = setTimeout(() => {
       // Nothing may throw out of a timer.
@@ -198,6 +202,7 @@ abstract class Publisher {
 
   /** An explicit `postX()` re-arms a disabled publisher. A restart is the other way. */
   protected rearm(): void {
+    this.stopped = false;
     this.disabledReason = undefined;
   }
 }
