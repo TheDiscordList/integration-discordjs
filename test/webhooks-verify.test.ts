@@ -34,6 +34,11 @@ const body = JSON.stringify({
 });
 
 describe('verifyWebhook', () => {
+  it('rejects a non-ASCII v1 of the right character length rather than throwing RangeError', () => {
+    const header = `t=${Math.floor(NOW / 1000)},v1=${'é'.repeat(64)}`;
+    expect(codeOf(() => verifyWebhook(body, header, SECRET, { now }))).toBe('INVALID_SIGNATURE');
+  });
+
   it('accepts a valid signature and returns the parsed payload', () => {
     const event = verifyWebhook(body, sign(body), SECRET, { now });
     expect(event.event).toBe('listing.upvoted');
