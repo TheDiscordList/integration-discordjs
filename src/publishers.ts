@@ -284,9 +284,8 @@ export class StatsPublisher extends Publisher {
       }
 
       const shardCount = this.deps.topology.shardCount;
-      // Every /stats post re-indexes Scout, evaluates achievements and fires a
-      // bot.stats_reported webhook even when the number did not move. There is
-      // no server-side dedupe, so the skip has to happen here.
+      // The server keeps an unchanged count from re-indexing or firing a webhook,
+      // but the request still spends the budget stats and commands share.
       if (
         count === this.lastCount
         && shardCount === this.lastShardCount

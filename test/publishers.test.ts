@@ -92,8 +92,6 @@ describe('StatsPublisher', () => {
     publisher.stop();
   });
 
-  // Every /stats post re-indexes Scout, evaluates achievements and fires a
-  // bot.stats_reported webhook, even when the number did not move.
   it('skips a tick whose count has not changed', async () => {
     const api = makeApi();
     const publisher = new StatsPublisher(makeDeps({ api }));
