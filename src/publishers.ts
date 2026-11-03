@@ -496,7 +496,10 @@ export class CommandsPublisher extends Publisher {
 
   async post(): Promise<PostResult> {
     this.rearm();
-    return this.publish();
+    const result = await this.publish();
+    // A pending retry would only post the same list again.
+    if (result.ok) this.clear();
+    return result;
   }
 
   private async publish(): Promise<PostResult> {

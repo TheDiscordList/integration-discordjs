@@ -528,6 +528,22 @@ describe('CommandsPublisher', () => {
     expect(api.post).toHaveBeenCalledTimes(1);
   });
 
+  // The retry would only post the same list again, against the budget stats share.
+  it('drops the pending retry once a manual post lands', async () => {
+    const api = makeApi();
+    api.post.mockResolvedValueOnce({ kind: 'transient', status: 502, error: new Error('Bad Gateway') });
+    const publisher = new CommandsPublisher(makeDeps({ api }), { get: vi.fn().mockResolvedValue(commands) });
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS);
+    expect(await publisher.post()).toMatchObject({ ok: true });
+    expect(api.post).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(COMMANDS_RETRY_MS);
+    expect(api.post).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each<[string, Outcome]>([
     ['a 422', { kind: 'payload', status: 422 }],
     ['a 401', { kind: 'auth', status: 401 }],
