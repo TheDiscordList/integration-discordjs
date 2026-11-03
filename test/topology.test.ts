@@ -64,9 +64,18 @@ describe('collectShards', () => {
 
     expect(collectShards(client)).toEqual([
       { id: 0, status: 'ready', latency_ms: 42, guilds: 1 },
-      { id: 1, status: 'resuming', latency_ms: 80, guilds: 2 },
+      { id: 1, status: 'resuming', latency_ms: 80 },
     ]);
   });
+
+  // A restart's first `connecting` beat would otherwise zero the public count.
+  it.each([Status.Connecting, Status.Idle, Status.Resuming, Status.Disconnected])(
+    'omits guilds from a shard in status %i',
+    (status) => {
+      const client = fakeClient({ ws: { shards: new Map([[0, { id: 0, status, ping: -1 }]]) } });
+      expect(collectShards(client)[0]).not.toHaveProperty('guilds');
+    },
+  );
 
   // ping is -1 before the first heartbeat ACK and the API minimum is 0, so the
   // key must be absent rather than negative.

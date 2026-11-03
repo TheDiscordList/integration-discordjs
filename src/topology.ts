@@ -19,7 +19,8 @@ export interface ShardReport {
   id: number;
   status: ShardStatus;
   latency_ms?: number;
-  guilds: number;
+  /** Absent until the shard is ready. */
+  guilds?: number;
 }
 
 export type TopologyKind =
@@ -81,11 +82,12 @@ export function mapShardStatus(status: number): ShardStatus {
 
 export function collectShards(client: ClientLike): ShardReport[] {
   return [...client.ws.shards.values()].map((shard) => {
-    const report: ShardReport = {
-      id: shard.id,
-      status: mapShardStatus(shard.status),
-      guilds: client.guilds.cache.filter((guild) => guild.shardId === shard.id).size,
-    };
+    const report: ShardReport = { id: shard.id, status: mapShardStatus(shard.status) };
+    // A shard that is not ready counts 0 guilds, and the server would take that
+    // for the bot's public count. A missing key reads as "unknown" instead.
+    if (report.status === 'ready') {
+      report.guilds = client.guilds.cache.filter((guild) => guild.shardId === shard.id).size;
+    }
     // `ping` is -1 before the first heartbeat ACK and the API minimum is 0, so
     // the key is omitted rather than sent negative.
     if (shard.ping >= 0) report.latency_ms = Math.min(Math.round(shard.ping), MAX_LATENCY_MS);
