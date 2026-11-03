@@ -66,7 +66,7 @@ export interface AutopostOptions {
     interval?: number | undefined;
     /** Trailing debounce after guildCreate/guildDelete. Default: {@link STATS_DEBOUNCE_MS}. */
     debounce?: number | undefined;
-    /** Hard floor between two POSTs. Default: {@link STATS_MIN_GAP_MS}. */
+    /** Hard floor between two POSTs, never below the default. Default: {@link STATS_MIN_GAP_MS}. */
     minGap?: number | undefined;
   } | undefined;
 

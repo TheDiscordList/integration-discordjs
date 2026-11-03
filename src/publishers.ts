@@ -227,7 +227,7 @@ export class StatsPublisher extends Publisher {
     super(deps);
     this.interval = options.interval ?? STATS_INTERVAL_MS;
     this.debounce = options.debounce ?? STATS_DEBOUNCE_MS;
-    this.minGap = options.minGap ?? STATS_MIN_GAP_MS;
+    this.minGap = Math.max(options.minGap || 0, STATS_MIN_GAP_MS);
     this.getServerCount = options.getServerCount;
   }
 

@@ -143,6 +143,17 @@ describe('StatsPublisher', () => {
     publisher.stop();
   });
 
+  // The floor protects the budget stats and commands share, so it cannot be configured away.
+  it.each([0, -1, Number.NaN, 1_000])('holds the minimum gap against a configured minGap of %d', async (minGap) => {
+    const api = makeApi();
+    const publisher = new StatsPublisher(makeDeps({ api }), { minGap });
+
+    await publisher.post();
+    expect(await publisher.post()).toMatchObject({ skipped: 'min-gap' });
+    expect(api.post).toHaveBeenCalledTimes(1);
+    publisher.stop();
+  });
+
   it('disables itself exactly once on a 401 and clears its timer', async () => {
     const api = makeApi({ kind: 'auth', status: 401 });
     const emit = makeEmit();

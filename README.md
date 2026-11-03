@@ -112,9 +112,9 @@ autopost(client, token, {
 });
 ```
 
-`minGap` is a hard floor between two stats POSTs. A join storm, a mass
-reconnect and a manual `postStats()` all route through it, so the ceiling is
-structurally one request per minute.
+`minGap` is a hard floor between two stats POSTs, and can only be raised above
+its 60s default. A join storm, a mass reconnect and a manual `postStats()` all
+route through it, so the ceiling is structurally one request per minute.
 
 `commands.postEmpty` is `false` because posting an empty array **clears** the
 command list on your listing. Turn it on only if that is what you mean.
