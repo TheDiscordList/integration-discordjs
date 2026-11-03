@@ -250,6 +250,16 @@ describe('measureServerCount', () => {
       .toBeNull();
   });
 
+  it('sums indomitable clusters, whose client.shard names the count clusterCount', async () => {
+    const client = fakeClient({
+      shard: {
+        clusterCount: 2,
+        broadcastEval: vi.fn().mockResolvedValue([{ ready: true, g: 10 }, { ready: true, g: 20 }]),
+      },
+    });
+    expect(await measureServerCount(client, managed({ kind: 'indomitable', clusterCount: 2 }), undefined)).toBe(30);
+  });
+
   it('returns null when fewer shards answer than expected', async () => {
     const client = fakeClient({
       shard: { ids: [0], count: 3, broadcastEval: vi.fn().mockResolvedValue([{ ready: true, g: 10 }]) },

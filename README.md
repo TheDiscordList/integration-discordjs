@@ -74,7 +74,7 @@ client, and every layout is covered:
 | Internal sharding | the local guild cache | this process | this process |
 | `ShardingManager` | `broadcastEval` sum | shard 0 | every shard, for itself |
 | discord-hybrid-sharding | `cluster.broadcastEval` sum | cluster 0 | every cluster, for itself |
-| indomitable | the local cache (warns once) | cluster 0 | every cluster, for itself |
+| indomitable | `client.shard.broadcastEval` sum | cluster 0 | every cluster, for itself |
 | something else | your `getServerCount()` | cluster 0 | every cluster, for itself |
 
 Every process heartbeats for **itself** on purpose. A manager reporting "all

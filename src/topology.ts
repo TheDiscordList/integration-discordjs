@@ -178,11 +178,13 @@ function aggregationBus(
   client: ClientLike,
 ): { count: number; broadcastEval: (fn: unknown) => Promise<unknown[]> } | null {
   const bus = (client.cluster ?? client.shard) as
-    | { count?: number; broadcastEval?: (fn: unknown) => Promise<unknown[]> }
+    | { count?: number; clusterCount?: number; broadcastEval?: (fn: unknown) => Promise<unknown[]> }
     | null
     | undefined;
-  if (!bus || typeof bus.broadcastEval !== 'function' || typeof bus.count !== 'number') return null;
-  return { count: bus.count, broadcastEval: bus.broadcastEval.bind(bus) };
+  // Indomitable's `client.shard` evaluates once per cluster, and names the count so.
+  const count = bus?.count ?? bus?.clusterCount;
+  if (!bus || typeof bus.broadcastEval !== 'function' || typeof count !== 'number') return null;
+  return { count, broadcastEval: bus.broadcastEval.bind(bus) };
 }
 
 /**
