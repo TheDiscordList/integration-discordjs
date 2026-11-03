@@ -526,7 +526,7 @@ export class CommandsPublisher extends Publisher {
     // Forwarded verbatim. Client-side validation would be actively harmful:
     // Discord sends numbers for INTEGER and NUMBER choice values, which the
     // published spec types as strings and the server accepts.
-    return this.send(`/bots/${this.deps.botId}/commands`, { commands: raw }, 'normal');
+    return this.send(`/bots/${this.deps.botId}/commands`, { commands: raw }, 'normal', COMMANDS_RETRY_MS);
   }
 }
 

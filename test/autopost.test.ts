@@ -255,6 +255,19 @@ describe('autopost', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  // Waited out inside post(), a long window would hold the caller for up to an hour.
+  it('answers a commands 429 that outlasts the 5-minute retry at once', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 429, headers: { 'retry-after': '3600' } })));
+    const rest = { get: vi.fn().mockResolvedValue([{ name: 'ping' }]) };
+    const poster = autopost(start(fakeClient({ isReady: () => true, rest })), 'tok', {
+      stats: { enabled: false },
+      heartbeat: { enabled: false },
+    });
+
+    expect(await poster.postCommands()).toMatchObject({ ok: false, status: 429, skipped: 'throttled' });
+    poster.stop();
+  });
+
   it('refuses a manual post after stop(), which is not restartable', async () => {
     const fetchMock = stubFetch();
     const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok');

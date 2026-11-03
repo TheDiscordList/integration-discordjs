@@ -424,7 +424,7 @@ describe('CommandsPublisher', () => {
     await vi.advanceTimersByTimeAsync(COMMANDS_DELAY_MS);
 
     expect(rest.get).toHaveBeenCalledWith('/applications/1/commands');
-    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands }, 'normal', undefined, expect.any(AbortSignal));
+    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands }, 'normal', COMMANDS_RETRY_MS, expect.any(AbortSignal));
     publisher.stop();
   });
 
@@ -445,7 +445,7 @@ describe('CommandsPublisher', () => {
     );
 
     await publisher.post();
-    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands: [] }, 'normal', undefined, expect.any(AbortSignal));
+    expect(api.post).toHaveBeenCalledWith('/bots/1/commands', { commands: [] }, 'normal', COMMANDS_RETRY_MS, expect.any(AbortSignal));
   });
 
   it('does nothing on a process that is not the elected publisher', async () => {
