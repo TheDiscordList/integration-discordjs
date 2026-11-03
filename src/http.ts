@@ -3,9 +3,9 @@
  *
  * There is a single client-side suspension rather than one per endpoint,
  * because the server counts stats and commands against one per-bot budget.
- * Heartbeats bypass it: a
- * dropped stats post is a stale number, a dropped heartbeat is a false "down"
- * on the user's public status page.
+ * Heartbeats have a limiter of their own, so their 429 leaves it alone, and they
+ * bypass it: a dropped stats post is a stale number, a dropped heartbeat is a
+ * false "down" on the user's public status page.
  */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 /** However far out Retry-After or X-RateLimit-Reset points, never go quiet for longer. */
@@ -105,10 +105,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
   // Instance state, never module state: a dual ESM+CJS package loaded in both
   // formats would otherwise share one budget across two unrelated posters.
-  let suspendedUntil = 0;
+  const suspendedUntil: Record<Priority, number> = { normal: 0, heartbeat: 0 };
 
-  async function once(path: string, body: unknown, ignoreLimit: boolean): Promise<Outcome> {
-    if (!ignoreLimit && performance.now() < suspendedUntil) {
+  async function once(path: string, body: unknown, priority: Priority, ignoreLimit: boolean): Promise<Outcome> {
+    if (!ignoreLimit && performance.now() < suspendedUntil.normal) {
       return { kind: 'dropped', status: null };
     }
 
@@ -151,7 +151,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       // An absolute unix time, so it is read against the wall clock once.
       const reset = Number(response.headers.get('x-ratelimit-reset'));
       const untilReset = Number.isFinite(reset) && reset > 0 ? reset * 1000 - Date.now() : 0;
-      suspendedUntil = performance.now()
+      suspendedUntil[priority] = performance.now()
         + Math.min(Math.max(outcome.retryAfterMs, untilReset), MAX_RATE_LIMIT_WAIT_MS)
         + Math.round(Math.random() * 2000);
     }
@@ -164,10 +164,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         // A request that just waited out the window goes through it, even if
         // its timer fires a tick early.
-        outcome = await once(path, body, priority === 'heartbeat' || outcome.kind === 'throttled');
+        outcome = await once(path, body, priority, priority === 'heartbeat' || outcome.kind === 'throttled');
         if (!isRetryable(outcome) || attempt === MAX_ATTEMPTS - 1) break;
 
-        const delay = outcome.kind === 'throttled' ? suspendedUntil - performance.now() : backoffMs(attempt);
+        const delay = outcome.kind === 'throttled' ? suspendedUntil[priority] - performance.now() : backoffMs(attempt);
         if (nextTickInMs !== undefined && delay >= nextTickInMs) break;
         await sleep(delay);
       }

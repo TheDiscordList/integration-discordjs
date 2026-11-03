@@ -278,10 +278,11 @@ heartbeat's internal stats forward.
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
-  budget per bot (60/min; heartbeats have their own 120/min). A `429` suspends
-  stats and commands together for `Retry-After` (or until `X-RateLimit-Reset`,
-  at most an hour); heartbeats bypass it — a stale number beats a false "down"
-  on your status page.
+  budget per bot (60/min; heartbeats have a limit of their own). A `429` on
+  either suspends stats and commands together for `Retry-After` (or until
+  `X-RateLimit-Reset`, at most an hour); heartbeats bypass it, and their own
+  `429` suspends nothing — a stale number beats a false "down" on your status
+  page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing. The distinction is deliberate, so probing cannot enumerate.
 - **Guild counts can drift upward permanently.** If Discord re-IDENTIFYs a
