@@ -23,6 +23,7 @@ interface FakeClient {
   ws: { shards: Map<number, unknown> };
   shard: null;
   rest: { get: ReturnType<typeof vi.fn> };
+  destroy: ReturnType<typeof vi.fn>;
   fire: (event: string) => void;
 }
 
@@ -45,6 +46,7 @@ function fakeClient(over: Partial<FakeClient> = {}): FakeClient {
     ws: { shards: new Map([[0, { id: 0, status: Status.Ready, ping: 30 }]]) },
     shard: null,
     rest: { get: vi.fn().mockResolvedValue([]) },
+    destroy: vi.fn().mockResolvedValue(undefined),
     fire: (event: string) => {
       for (const listener of listeners.get(event) ?? []) listener();
     },
@@ -85,6 +87,25 @@ describe('autopost', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await poster.postStats()).toMatchObject({ ok: false, skipped: 'disabled' });
     poster.stop();
+  });
+
+  // Seen against the real gateway: a destroy closes with 1000, which discord.js treats as
+  // recoverable, so the shard read as connecting and the beats never ended.
+  it('stops publishing when the client is destroyed', async () => {
+    const fetchMock = stubFetch();
+    const destroy = vi.fn().mockResolvedValue(undefined);
+    const client = fakeClient({ isReady: () => true, destroy });
+
+    autopost(start(client), 'tok');
+    await vi.advanceTimersByTimeAsync(11_000);
+    const sent = fetchMock.mock.calls.length;
+    expect(sent).toBeGreaterThan(0);
+
+    await start(client).destroy();
+    expect(destroy).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(sent);
   });
 
   it('defers all work until the client is ready', async () => {

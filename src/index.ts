@@ -309,6 +309,14 @@ export function autopost(
     userAgent: `@thediscordlist/discord.js/${version} (discord.js ${discordJsVersion})`,
   });
 
+  // discord.js has no shutdown event. A destroy closes the socket with 1000, which it treats as
+  // recoverable, so the shards would read as reconnecting and keep beating for good.
+  const destroy = client.destroy.bind(client);
+  client.destroy = () => {
+    poster.stop();
+    return destroy();
+  };
+
   // With an explicit botId the heartbeat can start before login, so a booting
   // bot reports "connecting" rather than looking dead on its status page.
   if (options.botId) {

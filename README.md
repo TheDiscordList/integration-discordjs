@@ -143,6 +143,9 @@ unhandled `'error'`.
 An explicit `postX()` also re-arms a publisher that disabled itself, so you can
 retry after fixing a token or a listing id without restarting.
 
+`stop()` clears every timer and detaches every listener; `client.destroy()` does
+the same.
+
 ## Webhooks
 
 A separate entry point that imports only `node:crypto`. It does not load
