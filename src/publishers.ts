@@ -366,11 +366,15 @@ export class HeartbeatPublisher extends Publisher {
   }
 
   async post(): Promise<PostResult> {
+    const wasDisabled = this.disabledReason !== undefined;
     this.rearm();
     if (this.deps.topology.clusterCount === null) {
       return { ok: false, status: null, skipped: 'cluster-count-unknown' };
     }
-    return this.beat(true);
+    const result = await this.beat(true);
+    // A disable ended the loop, and a manual beat does not schedule the next one.
+    if (wasDisabled && this.disabledReason === undefined) this.scheduleNext();
+    return result;
   }
 
   private async tick(): Promise<void> {
@@ -380,7 +384,11 @@ export class HeartbeatPublisher extends Publisher {
 
   private async beat(manual: boolean): Promise<PostResult> {
     if (!manual && this.disabledReason !== undefined) return { ok: false, status: null, skipped: 'disabled' };
-    if (this.inFlight) return { ok: false, status: null, skipped: 'in-flight' };
+    if (this.inFlight) {
+      // The beat in flight may be manual, and that one schedules nothing.
+      if (!manual) this.scheduleNext();
+      return { ok: false, status: null, skipped: 'in-flight' };
+    }
 
     const clusterCount = this.deps.topology.clusterCount;
     if (clusterCount === null) return { ok: false, status: null, skipped: 'cluster-count-unknown' };

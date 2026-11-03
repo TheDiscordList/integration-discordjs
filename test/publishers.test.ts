@@ -291,6 +291,44 @@ describe('HeartbeatPublisher', () => {
     publisher.stop();
   });
 
+  it('keeps beating when a tick lands during a manual beat', async () => {
+    let answer: (outcome: Outcome) => void = () => undefined;
+    const api = makeApi();
+    const publisher = new HeartbeatPublisher(makeDeps({ api }));
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.post).toHaveBeenCalledTimes(1);
+
+    api.post.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve;
+    }));
+    const manual = publisher.post();
+    await vi.advanceTimersByTimeAsync(36_000);
+    answer(OK);
+    await manual;
+    expect(api.post).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(36_000);
+    expect(api.post).toHaveBeenCalledTimes(3);
+    publisher.stop();
+  });
+
+  it('restarts the loop a disable ended, once a manual beat lands', async () => {
+    const api = makeApi();
+    api.post.mockResolvedValueOnce({ kind: 'config', status: 404 });
+    const publisher = new HeartbeatPublisher(makeDeps({ api }));
+
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    expect(await publisher.post()).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(36_000);
+    expect(api.post.mock.calls.length).toBeGreaterThan(2);
+    publisher.stop();
+  });
+
   it('coalesces a storm of out-of-band beats into one', async () => {
     const api = makeApi();
     const publisher = new HeartbeatPublisher(makeDeps({ api }));
