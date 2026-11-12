@@ -75,6 +75,7 @@
     "smoke": "node scripts/smoke.mjs",
     "lint:pkg": "publint && attw --pack .",
     "changeset": "changeset",
+    "release:ci": "npm view \"$npm_package_name@$npm_package_version\" version >/dev/null 2>&1 || (npm stage publish --access public && changeset git-tag)",
     "prepublishOnly": "npm run build && npm run lint:pkg"
   },
   "devDependencies": {

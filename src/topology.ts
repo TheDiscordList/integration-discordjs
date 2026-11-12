@@ -19,7 +19,8 @@ export interface ShardReport {
   id: number;
   status: ShardStatus;
   latency_ms?: number;
-  guilds: number;
+  /** Absent until the shard is ready. */
+  guilds?: number;
 }
 
 export type TopologyKind =
@@ -81,11 +82,12 @@ export function mapShardStatus(status: number): ShardStatus {
 
 export function collectShards(client: ClientLike): ShardReport[] {
   return [...client.ws.shards.values()].map((shard) => {
-    const report: ShardReport = {
-      id: shard.id,
-      status: mapShardStatus(shard.status),
-      guilds: client.guilds.cache.filter((guild) => guild.shardId === shard.id).size,
-    };
+    const report: ShardReport = { id: shard.id, status: mapShardStatus(shard.status) };
+    // A shard that is not ready counts 0 guilds, and the server would take that
+    // for the bot's public count. A missing key reads as "unknown" instead.
+    if (report.status === 'ready') {
+      report.guilds = client.guilds.cache.filter((guild) => guild.shardId === shard.id).size;
+    }
     // `ping` is -1 before the first heartbeat ACK and the API minimum is 0, so
     // the key is omitted rather than sent negative.
     if (shard.ping >= 0) report.latency_ms = Math.min(Math.round(shard.ping), MAX_LATENCY_MS);
@@ -176,11 +178,13 @@ function aggregationBus(
   client: ClientLike,
 ): { count: number; broadcastEval: (fn: unknown) => Promise<unknown[]> } | null {
   const bus = (client.cluster ?? client.shard) as
-    | { count?: number; broadcastEval?: (fn: unknown) => Promise<unknown[]> }
+    | { count?: number; clusterCount?: number; broadcastEval?: (fn: unknown) => Promise<unknown[]> }
     | null
     | undefined;
-  if (!bus || typeof bus.broadcastEval !== 'function' || typeof bus.count !== 'number') return null;
-  return { count: bus.count, broadcastEval: bus.broadcastEval.bind(bus) };
+  // Indomitable's `client.shard` evaluates once per cluster, and names the count so.
+  const count = bus?.count ?? bus?.clusterCount;
+  if (!bus || typeof bus.broadcastEval !== 'function' || typeof count !== 'number') return null;
+  return { count, broadcastEval: bus.broadcastEval.bind(bus) };
 }
 
 /**
@@ -192,6 +196,10 @@ export async function measureServerCount(
   topology: Topology,
   getServerCount?: () => number | Promise<number>,
 ): Promise<number | null> {
+  // Before the callback too: every cluster posting at +5s burns the per-bot
+  // budget, and cluster 0's commands post gets suspended along with them.
+  if (!topology.isStatsPublisher) return null;
+
   if (getServerCount) {
     try {
       const value = await getServerCount();
@@ -206,8 +214,6 @@ export async function measureServerCount(
   // outage, because GUILD_DELETE with `unavailable: true` only flips a flag.
   // So a local read needs no sanity backstop.
   if (topology.kind === 'single' || topology.kind === 'internal') return client.guilds.cache.size;
-
-  if (!topology.isStatsPublisher) return null;
 
   const bus = aggregationBus(client);
   if (!bus) return null;

@@ -100,10 +100,11 @@ function requireSecret(secret: string): void {
   }
 }
 
-/** Length is not secret, and `timingSafeEqual` throws when lengths differ. */
+/** Length is not secret, and `timingSafeEqual` throws when byte lengths differ. */
 function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length || a.length === 0) return false;
-  return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
 }
 
 export interface VerifyWebhookOptions {
@@ -357,6 +358,10 @@ export function createWebhookHandler(
         return Array.isArray(value) ? value[0] : value;
       }));
       end(status);
-    })();
+    })().catch(() => {
+      // Only a throwing onError lands here. Floating, it would kill the host.
+      res.statusCode = 500;
+      res.end();
+    });
   };
 }

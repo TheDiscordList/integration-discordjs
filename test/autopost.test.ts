@@ -23,6 +23,7 @@ interface FakeClient {
   ws: { shards: Map<number, unknown> };
   shard: null;
   rest: { get: ReturnType<typeof vi.fn> };
+  destroy: ReturnType<typeof vi.fn>;
   fire: (event: string) => void;
 }
 
@@ -45,6 +46,7 @@ function fakeClient(over: Partial<FakeClient> = {}): FakeClient {
     ws: { shards: new Map([[0, { id: 0, status: Status.Ready, ping: 30 }]]) },
     shard: null,
     rest: { get: vi.fn().mockResolvedValue([]) },
+    destroy: vi.fn().mockResolvedValue(undefined),
     fire: (event: string) => {
       for (const listener of listeners.get(event) ?? []) listener();
     },
@@ -85,6 +87,25 @@ describe('autopost', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await poster.postStats()).toMatchObject({ ok: false, skipped: 'disabled' });
     poster.stop();
+  });
+
+  // Seen against the real gateway: a destroy closes with 1000, which discord.js treats as
+  // recoverable, so the shard read as connecting and the beats never ended.
+  it('stops publishing when the client is destroyed', async () => {
+    const fetchMock = stubFetch();
+    const destroy = vi.fn().mockResolvedValue(undefined);
+    const client = fakeClient({ isReady: () => true, destroy });
+
+    autopost(start(client), 'tok');
+    await vi.advanceTimersByTimeAsync(11_000);
+    const sent = fetchMock.mock.calls.length;
+    expect(sent).toBeGreaterThan(0);
+
+    await start(client).destroy();
+    expect(destroy).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(sent);
   });
 
   it('defers all work until the client is ready', async () => {
@@ -168,6 +189,22 @@ describe('autopost', () => {
     poster.stop();
   });
 
+  it('keeps beating when a posted listener throws', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok', {
+      stats: { enabled: false },
+      commands: { enabled: false },
+    });
+    poster.on('posted', () => {
+      throw new Error('boom');
+    });
+
+    await vi.advanceTimersByTimeAsync(36_000);
+
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+    poster.stop();
+  });
+
   it('stop() clears every timer and detaches every client listener', () => {
     stubFetch();
     const client = fakeClient({ isReady: () => true });
@@ -178,6 +215,69 @@ describe('autopost', () => {
 
     expect(vi.getTimerCount()).toBe(0);
     expect(client.off).toHaveBeenCalled();
+  });
+
+  it('stays stopped when stop() lands while a post is in flight', async () => {
+    let answer: (response: Response) => void = () => undefined;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      answer = resolve;
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok', { heartbeat: { enabled: false } });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    poster.stop();
+    answer(new Response('{}', { status: 200 }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // A beat sent after this would put the stale `ready` snapshot on the status page.
+  it('ends a retry wait when stop() lands during it, and sends nothing more', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient()), 'tok', { botId: '1' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockImplementation(async () => new Response('{}', { status: 500 }));
+    const beat = poster.postHeartbeat();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    poster.stop();
+    expect(await beat).toMatchObject({ ok: false, skipped: 'stopped' });
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // Waited out inside post(), a long window would hold the caller for up to an hour.
+  it('answers a commands 429 that outlasts the 5-minute retry at once', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 429, headers: { 'retry-after': '3600' } })));
+    const rest = { get: vi.fn().mockResolvedValue([{ name: 'ping' }]) };
+    const poster = autopost(start(fakeClient({ isReady: () => true, rest })), 'tok', {
+      stats: { enabled: false },
+      heartbeat: { enabled: false },
+    });
+
+    expect(await poster.postCommands()).toMatchObject({ ok: false, status: 429, skipped: 'throttled' });
+    poster.stop();
+  });
+
+  it('refuses a manual post after stop(), which is not restartable', async () => {
+    const fetchMock = stubFetch();
+    const poster = autopost(start(fakeClient({ isReady: () => true })), 'tok');
+    poster.stop();
+
+    expect(await poster.postStats()).toMatchObject({ skipped: 'disabled' });
+    expect(await poster.postHeartbeat()).toMatchObject({ skipped: 'disabled' });
+    expect(await poster.postCommands()).toMatchObject({ skipped: 'disabled' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('sends a user agent naming both packages', async () => {
@@ -217,6 +317,23 @@ describe('autopost', () => {
     await vi.advanceTimersByTimeAsync(1);
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://thediscordlist.com/api/bots/42/heartbeat');
+    poster.stop();
+  });
+
+  // `shards: 'auto'` fills ws.shards at connect, so a count read before login says 1.
+  it('re-detects the shard count on ready when botId built it before login', async () => {
+    const fetchMock = stubFetch();
+    const shards = new Map<number, unknown>();
+    const client = fakeClient({ ws: { shards } });
+    const poster = autopost(start(client), 'tok', { botId: '42' });
+
+    shards.set(0, { id: 0, status: Status.Ready, ping: 30 });
+    shards.set(1, { id: 1, status: Status.Ready, ping: 30 });
+    client.fire(Events.ClientReady);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const stats = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/stats')) as [string, RequestInit];
+    expect(JSON.parse(String(stats[1].body))).toMatchObject({ shard_count: 2 });
     poster.stop();
   });
 });
